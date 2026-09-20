@@ -1,0 +1,2869 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FFmpeg Audio Node Editor</title>
+<style>
+:root{
+  --bg-0:#161616;
+  --bg-1:#1d1d1d;
+  --bg-2:#232323;
+  --bg-grid-dot:#2c2c2c;
+  --bg-grid-dot-major:#333333;
+  --panel:#282828;
+  --panel-border:#0f0f0f;
+  --node-body:#2a2a2a;
+  --node-body-collapsed:#242424;
+  --node-border:#111111;
+  --node-border-selected:#e8a355;
+  --text-0:#e6e4e0;
+  --text-1:#b8b5b0;
+  --text-2:#84817c;
+  --accent:#e8a355;
+  --socket-audio:#8fd15c;
+  --socket-audio-dim:#4f6a3e;
+  --warn:#e0563f;
+  --warn-bg:#3a2420;
+  --ok:#5cc27e;
+  --link-default:#9a9690;
+  --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  --ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Helvetica, Arial, sans-serif;
+}
+*{box-sizing:border-box;}
+html,body{
+  margin:0; padding:0; width:100%; height:100%; overflow:hidden;
+  background:var(--bg-0); color:var(--text-0);
+  font-family:var(--ui); font-size:12px;
+  -webkit-font-smoothing:antialiased;
+}
+#app{
+  display:flex; flex-direction:column; width:100vw; height:100vh;
+}
+
+/* ---------- Toolbar ---------- */
+#toolbar{
+  flex:0 0 auto;
+  display:flex; align-items:center; gap:14px;
+  height:44px; padding:0 12px;
+  background:var(--panel); border-bottom:1px solid var(--panel-border);
+  z-index:50;
+}
+#toolbar .brand{
+  font-weight:600; font-size:13px; color:var(--text-0); letter-spacing:.2px;
+  white-space:nowrap;
+}
+#toolbar .brand .sub{ color:var(--text-2); font-weight:400; margin-left:6px; font-size:11px;}
+.tb-sep{ width:1px; height:22px; background:var(--panel-border); }
+.tb-group{ display:flex; align-items:center; gap:6px; }
+.tb-group label{ color:var(--text-2); font-size:11px; }
+button.tb-btn, select.tb-select, input.tb-input{
+  background:#333333; color:var(--text-0); border:1px solid #141414;
+  border-radius:4px; padding:5px 10px; font-size:11.5px; cursor:pointer;
+  font-family:var(--ui);
+}
+button.tb-btn:hover{ background:#3c3c3c; }
+button.tb-btn:active{ background:#444; }
+button.tb-btn.primary{ background:#4a6b3f; border-color:#2f4527; }
+button.tb-btn.primary:hover{ background:#557647; }
+select.tb-select{ cursor:pointer; }
+#toolbar .spacer{ flex:1 1 auto; }
+#zoomLabel{ color:var(--text-2); font-variant-numeric:tabular-nums; min-width:42px; text-align:right;}
+
+/* ---------- Viewport ---------- */
+#viewport{
+  position:relative; flex:1 1 auto; overflow:hidden; cursor:default;
+  background:var(--bg-0);
+}
+#world{
+  position:absolute; top:0; left:0; width:1px; height:1px;
+  transform-origin:0 0;
+  will-change:transform;
+  z-index:10; /* paint above the grid and the link curves */
+}
+/* gridLayer is a SIBLING of #world (see below), not a child - it always
+   covers the full viewport and its background-position/-size are kept in
+   sync with pan/zoom in JS, so the dotted grid never runs out at any pan
+   offset the way a finite transformed element would. */
+#gridLayer{
+  position:absolute; top:0; left:0; width:100%; height:100%;
+  background-image:
+    radial-gradient(circle, var(--bg-grid-dot-major) 1.4px, transparent 1.4px),
+    radial-gradient(circle, var(--bg-grid-dot) 1px, transparent 1px);
+  background-size: 200px 200px, 40px 40px;
+  background-position: 0 0, 0 0;
+  z-index:1;
+}
+#linksSvg{
+  position:absolute; top:0; left:0; width:100%; height:100%;
+  pointer-events:none; overflow:visible;
+  z-index:5;
+}
+#linksSvg path.link{
+  fill:none; stroke:var(--link-default); stroke-width:2.4px; pointer-events:stroke;
+}
+#linksSvg path.link.mismatch{ stroke:var(--warn); stroke-dasharray:7 5; }
+#linksSvg path.link.selected{ stroke:var(--accent); stroke-width:3px; }
+#linksSvg path.link-hit{ fill:none; stroke:transparent; stroke-width:14px; pointer-events:stroke; cursor:pointer;}
+#linksSvg path.ghost{ fill:none; stroke:var(--socket-audio); stroke-width:2.4px; stroke-dasharray:5 4; opacity:.85;}
+
+/* ---------- Nodes ---------- */
+.node{
+  position:absolute; top:0; left:0;
+  width:240px;
+  background:var(--node-body);
+  border:1.5px solid var(--node-border);
+  border-radius:7px;
+  box-shadow:0 3px 10px rgba(0,0,0,.35);
+  z-index:10;
+  user-select:none;
+  font-size:11.5px;
+}
+.node.selected{ border-color:var(--node-border-selected); box-shadow:0 0 0 1px var(--node-border-selected), 0 4px 14px rgba(0,0,0,.45);}
+.node.has-mismatch{ box-shadow:0 0 0 1px var(--warn), 0 4px 14px rgba(0,0,0,.45); }
+.node .nhead{
+  height:28px; line-height:28px; padding:0 8px;
+  border-radius:6px 6px 0 0;
+  font-weight:600; color:#fff; letter-spacing:.1px;
+  display:flex; align-items:center; gap:6px;
+  cursor:grab; position:relative;
+  text-shadow:0 1px 1px rgba(0,0,0,.35);
+}
+.node .nhead:active{ cursor:grabbing; }
+.node .nhead .htitle{ flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px;}
+.node .nhead .hbtn{
+  width:16px; height:16px; flex:0 0 auto; border-radius:3px;
+  display:flex; align-items:center; justify-content:center;
+  background:rgba(255,255,255,.08); cursor:pointer; font-size:10px; line-height:1;
+  color:rgba(255,255,255,.85);
+}
+.node .nhead .hbtn:hover{ background:rgba(255,255,255,.22); }
+.node .nhead .latchip{
+  font-weight:400; font-size:9.5px; padding:1px 5px; border-radius:9px;
+  background:rgba(0,0,0,.28); color:rgba(255,255,255,.85); white-space:nowrap;
+}
+.node .nhead .latchip.warn{ background:var(--warn); color:#fff; }
+.node .nbody{ padding:6px 0 8px 0; }
+/* Collapsing hides parameters/latency info but keeps the I/O row (and its
+   sockets) visible and correctly positioned, so existing wires don't lose
+   their anchor point - only the bulky parameter list folds away. */
+.node.collapsed .nbody{ padding-bottom:4px; }
+.node.collapsed .nextra{ display:none; }
+
+.node .io-row{
+  display:flex; align-items:center; height:22px; position:relative; padding:0 9px;
+}
+.node .io-row .io-label{ font-size:11px; color:var(--text-1); }
+.node .io-row.in .io-label{ margin-left:9px; }
+.node .io-row.out{ justify-content:flex-end; }
+.node .io-row.out .io-label{ margin-right:9px; }
+.node .io-row .iospacer{ flex:1 1 auto; }
+.node .socket{
+  position:absolute; top:50%; transform:translateY(-50%);
+  width:11px; height:11px; border-radius:50%;
+  background:var(--socket-audio-dim);
+  border:1.6px solid #16210f;
+  cursor:crosshair;
+  z-index:20;
+}
+.node .socket.connected{ background:var(--socket-audio); }
+.node .socket.in{ left:-6px; }
+.node .socket.out{ right:-6px; }
+.node .socket:hover{ background:#c9f28e; transform:translateY(-50%) scale(1.25); }
+.node .io-dynbtns{ display:flex; gap:3px; margin-left:4px; }
+.node .io-dynbtns button{
+  width:14px;height:14px;border-radius:3px;border:none;background:#3a3a3a;color:#ccc;
+  font-size:10px;line-height:1;cursor:pointer;padding:0;
+}
+.node .io-dynbtns button:hover{ background:#484848; }
+
+.node .divider{ height:1px; background:#151515; margin:4px 0; }
+
+.node .prow{
+  display:flex; align-items:center; gap:6px; height:24px; padding:0 9px;
+}
+.node .prow .plabel{
+  flex:0 0 84px; color:var(--text-1); font-size:10.7px; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap;
+}
+.node .prow .pctl{ flex:1 1 auto; min-width:0; }
+.node .prow input[type=number], .node .prow input[type=text]{
+  width:100%; background:#1c1c1c; border:1px solid #111; color:var(--text-0);
+  border-radius:3px; padding:2px 5px; font-size:10.8px; font-family:var(--mono);
+}
+.node .prow input[type=range]{ width:100%; accent-color:var(--socket-audio); }
+.node .prow select{
+  width:100%; background:#1c1c1c; border:1px solid #111; color:var(--text-0);
+  border-radius:3px; padding:2px 3px; font-size:10.6px;
+}
+.node .prow input[type=checkbox]{ accent-color:var(--socket-audio); }
+.node .prow input:focus, .node .prow select:focus{ outline:1px solid var(--accent); }
+
+.node .latrow{
+  margin:5px 9px 0 9px; padding:5px 6px; border-radius:5px; background:#1f1f1f;
+  display:flex; align-items:center; gap:6px; font-size:10.3px; color:var(--text-1);
+}
+.node .latrow .latin{
+  width:64px; background:#111; border:1px solid #000; color:var(--text-0);
+  border-radius:3px; padding:2px 4px; font-family:var(--mono); font-size:10.3px;
+}
+.node .latrow .latms{ color:var(--text-2); flex:1 1 auto; }
+.node .latrow button{
+  width:16px;height:16px;border-radius:3px;border:none;background:#333;color:#ccc;
+  cursor:pointer; font-size:10px; line-height:1;
+}
+.node .latrow button:hover{ background:#444; }
+
+.node .mismatch-box{
+  margin:6px 9px 0 9px; padding:6px 7px; border-radius:5px;
+  background:var(--warn-bg); border:1px solid #5a2c22; color:#f0b8a8; font-size:10.3px;
+}
+.node .mismatch-box .mtitle{ font-weight:600; color:#f4c9ae; margin-bottom:3px; display:flex; align-items:center; gap:4px;}
+.node .mismatch-box .mline{ margin:1px 0; color:#e7b7a6; }
+.node .mismatch-box .mfix{
+  margin-top:5px; width:100%; padding:4px 0; border-radius:4px; border:none;
+  background:var(--warn); color:#fff; font-weight:600; cursor:pointer; font-size:10.5px;
+}
+.node .mismatch-box .mfix:hover{ filter:brightness(1.1); }
+
+/* ---------- Context Menu ---------- */
+#ctxMenu{
+  position:absolute; z-index:200; width:260px;
+  background:var(--panel); border:1px solid #111; border-radius:7px;
+  box-shadow:0 8px 30px rgba(0,0,0,.55);
+  display:none; flex-direction:column; overflow:hidden;
+  max-height:70vh;
+}
+#ctxMenu.open{ display:flex; }
+#ctxMenu .searchWrap{ padding:8px; border-bottom:1px solid #161616; flex:0 0 auto;}
+#ctxMenu input.search{
+  width:100%; background:#1a1a1a; border:1px solid #0e0e0e; color:var(--text-0);
+  border-radius:5px; padding:7px 9px; font-size:12px;
+}
+#ctxMenu input.search:focus{ outline:1px solid var(--accent); }
+#ctxMenu .menuList{ overflow-y:auto; padding:4px 0; }
+#ctxMenu .catHeader{
+  padding:6px 12px 4px 12px; font-size:10px; text-transform:uppercase;
+  letter-spacing:.06em; color:var(--text-2); font-weight:600;
+}
+#ctxMenu .item{
+  padding:6px 12px; cursor:pointer; display:flex; flex-direction:column; gap:1px;
+}
+#ctxMenu .item .iname{ color:var(--text-0); font-size:12px; }
+#ctxMenu .item .idesc{ color:var(--text-2); font-size:10px; }
+#ctxMenu .item:hover, #ctxMenu .item.active{ background:#3a3a3a; }
+#ctxMenu .empty{ padding:14px 12px; color:var(--text-2); text-align:center; }
+#ctxMenu .colordot{ display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:5px;}
+
+#nodeCtxMenu{
+  position:absolute; z-index:200; min-width:170px;
+  background:var(--panel); border:1px solid #111; border-radius:7px;
+  box-shadow:0 8px 30px rgba(0,0,0,.55); display:none; flex-direction:column; padding:4px 0;
+}
+#nodeCtxMenu.open{ display:flex; }
+#nodeCtxMenu .item{ padding:7px 14px; cursor:pointer; color:var(--text-0); font-size:12px;}
+#nodeCtxMenu .item:hover{ background:#3a3a3a; }
+#nodeCtxMenu .item.danger{ color:#f0a596; }
+
+/* ---------- Export panel ---------- */
+#exportPanel{
+  position:absolute; right:0; top:0; bottom:0; width:460px; max-width:92vw;
+  background:var(--panel); border-left:1px solid #111; z-index:120;
+  transform:translateX(100%); transition:transform .18s ease;
+  display:flex; flex-direction:column;
+  box-shadow:-8px 0 24px rgba(0,0,0,.4);
+}
+#exportPanel.open{ transform:translateX(0); }
+#exportPanel .ephead{
+  display:flex; align-items:center; padding:12px 14px; border-bottom:1px solid #161616;
+  font-weight:600; font-size:13px;
+}
+#exportPanel .ephead .spacer{ flex:1 1 auto; }
+#exportPanel .epbody{ flex:1 1 auto; overflow:auto; padding:14px; }
+#exportPanel textarea{
+  width:100%; height:160px; background:#151515; color:#c9e8a0; border:1px solid #0d0d0d;
+  border-radius:6px; padding:10px; font-family:var(--mono); font-size:11px; resize:vertical;
+  line-height:1.5;
+}
+#exportPanel .cmdbox{
+  width:100%; background:#151515; color:#e6e4e0; border:1px solid #0d0d0d;
+  border-radius:6px; padding:10px; font-family:var(--mono); font-size:11px;
+  white-space:pre-wrap; word-break:break-all; line-height:1.6;
+}
+#exportPanel h4{ margin:16px 0 6px 0; font-size:11px; color:var(--text-2); text-transform:uppercase; letter-spacing:.05em;}
+#exportPanel .issues{ background:var(--warn-bg); border:1px solid #5a2c22; border-radius:6px; padding:10px; color:#f0b8a8; font-size:11.5px;}
+#exportPanel .issues li{ margin:3px 0; }
+#exportPanel .okmsg{ color:var(--ok); font-size:11.5px; }
+
+/* ---------- Misc ---------- */
+#hint{
+  position:absolute; left:12px; bottom:12px; z-index:40;
+  background:rgba(30,30,30,.85); border:1px solid #111; border-radius:6px;
+  padding:8px 12px; font-size:11px; color:var(--text-1); max-width:360px; line-height:1.6;
+  pointer-events:none;
+}
+#hint b{ color:var(--text-0); }
+#legend{
+  position:absolute; right:12px; bottom:12px; z-index:40;
+  background:rgba(30,30,30,.85); border:1px solid #111; border-radius:6px;
+  padding:8px 12px; font-size:10.5px; color:var(--text-1); display:flex; gap:12px; align-items:center;
+  pointer-events:none;
+}
+#legend .lg-item{ display:flex; align-items:center; gap:5px; }
+#legend .lg-dot{ width:9px; height:9px; border-radius:50%; }
+
+::-webkit-scrollbar{ width:9px; height:9px; }
+::-webkit-scrollbar-track{ background:transparent; }
+::-webkit-scrollbar-thumb{ background:#3d3d3d; border-radius:5px; }
+::-webkit-scrollbar-thumb:hover{ background:#4c4c4c; }
+
+.toast{
+  position:absolute; left:50%; top:16px; transform:translateX(-50%);
+  background:#2f2f2f; border:1px solid #111; border-radius:6px; padding:8px 14px;
+  font-size:12px; color:var(--text-0); z-index:300; box-shadow:0 6px 18px rgba(0,0,0,.4);
+  opacity:0; pointer-events:none; transition:opacity .2s ease, transform .2s ease;
+}
+.toast.show{ opacity:1; transform:translateX(-50%) translateY(4px); }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <div class="brand">FFmpeg Audio Node Editor <span class="sub">audio filtergraph builder</span></div>
+    <div class="tb-sep"></div>
+    <div class="tb-group">
+      <label>Sample rate</label>
+      <select class="tb-select" id="sampleRateSel">
+        <option value="44100">44100 Hz</option>
+        <option value="48000" selected>48000 Hz</option>
+        <option value="96000">96000 Hz</option>
+        <option value="192000">192000 Hz</option>
+      </select>
+    </div>
+    <div class="tb-sep"></div>
+    <button class="tb-btn" id="btnDemo">Load demo: dry/wet phase issue</button>
+    <button class="tb-btn" id="btnClear">Clear graph</button>
+    <div class="tb-sep"></div>
+    <button class="tb-btn" id="btnSave" title="Download the current graph as a .json file">Save</button>
+    <button class="tb-btn" id="btnLoad" title="Load a graph from a .json file">Load</button>
+    <input type="file" id="loadFileInput" accept="application/json,.json" style="display:none;">
+    <div class="spacer"></div>
+    <button class="tb-btn" id="btnFit">Fit view</button>
+    <span id="zoomLabel">100%</span>
+    <div class="tb-sep"></div>
+    <button class="tb-btn primary" id="btnExport">Export filtergraph</button>
+  </div>
+
+  <div id="viewport">
+    <div id="gridLayer"></div>
+    <div id="world">
+      <!-- nodes injected here -->
+    </div>
+    <svg id="linksSvg"></svg>
+
+    <div id="hint">Right-click empty space to add a filter node &middot; drag from a socket to connect &middot; drag a node header to move it &middot; scroll to zoom, middle-drag to pan &middot; select + Delete to remove &middot; Save/Load keep a graph as a .json file</div>
+    <div id="legend">
+      <div class="lg-item"><span class="lg-dot" style="background:var(--socket-audio)"></span>connected</div>
+      <div class="lg-item"><span class="lg-dot" style="background:var(--warn)"></span>phase-alignment issue</div>
+    </div>
+
+    <!-- these overlays are positioned relative to #viewport (not the whole
+         window) so they never cover the toolbar above -->
+    <div id="ctxMenu">
+      <div class="searchWrap"><input class="search" type="text" placeholder="Search audio filters&hellip;" autocomplete="off" spellcheck="false"></div>
+      <div class="menuList"></div>
+    </div>
+    <div id="nodeCtxMenu"></div>
+
+    <div id="exportPanel">
+      <div class="ephead"><span>Export &ndash; ffmpeg filter_complex</span><span class="spacer"></span><button class="tb-btn" id="btnCloseExport">Close</button></div>
+      <div class="epbody" id="exportBody"></div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+  </div>
+</div>
+<script>
+'use strict';
+/* =========================================================================
+   FFmpeg Audio Node Editor
+   Single-file, dependency-free node graph editor for building ffmpeg
+   -filter_complex audio graphs, with sample-accurate latency tracking so
+   that dry/wet (or any converging) paths can be phase-aligned.
+   ========================================================================= */
+
+/* ---------------------------------------------------------------------
+   1. FILTER LIBRARY
+   Each filter definition:
+     id        unique key
+     name      display name
+     ffmpeg    real ffmpeg filter name (null for pseudo Source/Sink nodes)
+     cat       category id (see CATEGORIES)
+     desc      one-line description shown in the add-node search menu
+     io        { inputs: [...] | {dynamic:true,label,min,max,def},
+                 outputs:[...] | {dynamic:true,label,min,max,def} }
+     mergeCheck  true if multiple *program* inputs are summed/interleaved
+                 into one output, so phase/latency alignment matters
+     latency   function(params, sampleRate) -> estimated algorithmic
+               latency of the filter itself, in samples (0 for causal
+               IIR-style filters). This is a starting estimate only -
+               every node also exposes an editable manual override.
+     params    array of {key,label,type,def,min,max,step,unit,options,desc}
+               type one of: float,int,bool,select,text
+   ------------------------------------------------------------------- */
+
+const CATEGORIES = [
+  {id:'io',       name:'Source / Sink',        color:'#3f6b46'},
+  {id:'routing',  name:'Routing & Mixing',     color:'#4a5a8a'},
+  {id:'dynamics', name:'Dynamics',             color:'#8a6a3a'},
+  {id:'eq',       name:'EQ & Filters',         color:'#3a5f8a'},
+  {id:'spectral', name:'Spectral / Restoration',color:'#8a3a5f'},
+  {id:'time',     name:'Modulation & Time',    color:'#3a8a7a'},
+  {id:'spatial',  name:'Spatial / Stereo',     color:'#6a3a8a'},
+  {id:'level',    name:'Levels & Analysis',    color:'#565660'},
+  {id:'util',     name:'Utility',              color:'#70703f'},
+];
+const CAT_MAP = Object.fromEntries(CATEGORIES.map(c=>[c.id,c]));
+
+// ---- small helpers for parameter parsing used by latency formulas ----
+// parse the first entry of ffmpeg's adelay "delays" list (e.g. "50|120", "50",
+// "0.05s", "2400S") and return an equivalent sample count.
+function adelayFirstToSamples(delaysStr, sr){
+  if (!delaysStr) return 0;
+  const first = String(delaysStr).split(/[|,]/)[0].trim();
+  const m = first.match(/^(-?[0-9]*\.?[0-9]+)\s*([sS]?)$/);
+  if (!m) return 0;
+  const val = parseFloat(m[1]);
+  const suf = m[2];
+  if (suf === 'S') return Math.round(val);          // explicit sample count
+  if (suf === 's') return Math.round(val*sr);        // seconds
+  return Math.round(val/1000*sr);                    // milliseconds (default)
+}
+
+const FILTERS = [];
+function F(def){ FILTERS.push(def); return def; }
+
+/* ---- Source / Sink (pseudo nodes, not real ffmpeg filters) ---- */
+F({id:'audio_source', name:'Audio Source', ffmpeg:null, cat:'io',
+  desc:'A real input stream, e.g. -i file.wav ([0:a]).',
+  io:{ inputs:[], outputs:['out'] },
+  latency:()=>0,
+  params:[
+    {key:'inputIndex', label:'Input index', type:'int', def:0, min:0, max:99,
+      desc:'Maps to ffmpeg\u2019s input index, e.g. 0 \u2192 [0:a]'},
+  ]});
+F({id:'audio_output', name:'Audio Output', ffmpeg:null, cat:'io',
+  desc:'Final mapped output of the filtergraph.',
+  io:{ inputs:['in'], outputs:[] },
+  latency:()=>0,
+  params:[
+    {key:'label', label:'Output label', type:'text', def:'out',
+      desc:'Used to build -map "[label]"'},
+  ]});
+
+/* ---- Routing & Mixing ---- */
+F({id:'asplit', name:'Split', ffmpeg:'asplit', cat:'routing',
+  desc:'Duplicate one stream into N identical outputs.',
+  io:{ inputs:['in'], outputs:{dynamic:true,label:'out',min:2,max:8,def:2} },
+  latency:()=>0, params:[]});
+
+F({id:'amix', name:'Mix', ffmpeg:'amix', cat:'routing',
+  desc:'Sum multiple audio streams together (dry+wet mixing lives here).',
+  io:{ inputs:{dynamic:true,label:'in',min:2,max:8,def:2}, outputs:['out'] },
+  mergeCheck:true, latency:()=>0,
+  params:[
+    {key:'duration', label:'Duration', type:'select', def:'longest',
+      options:['longest','shortest','first']},
+    {key:'dropout_transition', label:'Dropout trans.', type:'float', def:2, min:0, max:20, step:0.1, unit:'s'},
+    {key:'weights', label:'Weights', type:'text', def:'1 1', desc:'space separated per-input weight'},
+    {key:'normalize', label:'Normalize', type:'bool', def:true},
+  ]});
+
+F({id:'amerge', name:'Merge Channels', ffmpeg:'amerge', cat:'routing',
+  desc:'Combine streams into one multichannel stream.',
+  io:{ inputs:{dynamic:true,label:'in',min:2,max:8,def:2}, outputs:['out'] },
+  mergeCheck:true, latency:()=>0, params:[]});
+
+F({id:'join', name:'Join', ffmpeg:'join', cat:'routing',
+  desc:'Join multiple streams into one with explicit channel mapping.',
+  io:{ inputs:{dynamic:true,label:'in',min:2,max:8,def:2}, outputs:['out'] },
+  mergeCheck:true, latency:()=>0,
+  params:[
+    {key:'channel_layout', label:'Layout', type:'select', def:'stereo',
+      options:['mono','stereo','2.1','quad','5.1','5.1(side)','7.1']},
+    {key:'map', label:'Channel map', type:'text', def:'', desc:'e.g. 0.0-FL|1.0-FR'},
+  ]});
+
+F({id:'adelay', name:'Delay', ffmpeg:'adelay', cat:'routing',
+  desc:'Delay channels by a fixed amount \u2014 use to time-align a path.',
+  io:{ inputs:['in'], outputs:['out'] },
+  latency:(p,sr)=>adelayFirstToSamples(p.delays, sr),
+  latencyAffectingParams:['delays'],
+  params:[
+    {key:'delays', label:'Delays', type:'text', def:'0',
+      desc:'ms per channel, "|" separated. Suffix "s" = seconds, "S" = samples.'},
+    {key:'all', label:'Apply to all ch.', type:'bool', def:false},
+  ]});
+
+F({id:'acrossfade', name:'Crossfade', ffmpeg:'acrossfade', cat:'routing',
+  desc:'Crossfade between two (or more, concatenated in sequence) streams.',
+  io:{ inputs:{dynamic:true,label:'in',min:2,max:8,def:2}, outputs:['out'] },
+  mergeCheck:true, latency:()=>0,
+  params:[
+    {key:'nb_samples', label:'Samples', type:'int', def:44100, min:1, max:2000000},
+    {key:'duration', label:'Duration', type:'float', def:0, min:0, max:60, step:0.1, unit:'s', desc:'0 = use Samples instead'},
+    {key:'overlap', label:'Overlap', type:'bool', def:true},
+    {key:'curve1', label:'Curve A', type:'select', def:'tri', options:['tri','qsin','esin','hsin','log','ipar','qua','cub','squ','cbr','par','exp','iqsin','ihsin','nofade']},
+    {key:'curve2', label:'Curve B', type:'select', def:'tri', options:['tri','qsin','esin','hsin','log','ipar','qua','cub','squ','cbr','par','exp','iqsin','ihsin','nofade']},
+  ]});
+
+/* ---- Dynamics ---- */
+F({id:'acompressor', name:'Compressor', ffmpeg:'acompressor', cat:'dynamics',
+  desc:'Classic downward/upward compressor.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'level_in', label:'Input level', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'mode', label:'Mode', type:'select', def:'downward', options:['downward','upward']},
+    {key:'threshold', label:'Threshold', type:'float', def:0.125, min:0.000977, max:1, step:0.001},
+    {key:'ratio', label:'Ratio', type:'float', def:2, min:1, max:20, step:0.1},
+    {key:'attack', label:'Attack', type:'float', def:20, min:0.01, max:2000, step:0.1, unit:'ms'},
+    {key:'release', label:'Release', type:'float', def:250, min:0.01, max:9000, step:1, unit:'ms'},
+    {key:'makeup', label:'Makeup', type:'float', def:1, min:1, max:64, step:0.1},
+    {key:'knee', label:'Knee', type:'float', def:2.82843, min:1, max:8, step:0.01},
+    {key:'link', label:'Link', type:'select', def:'average', options:['average','maximum']},
+    {key:'detection', label:'Detection', type:'select', def:'rms', options:['peak','rms']},
+    {key:'mix', label:'Mix', type:'float', def:1, min:0, max:1, step:0.01},
+  ]});
+
+F({id:'agate', name:'Gate', ffmpeg:'agate', cat:'dynamics',
+  desc:'Noise gate / expander.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'level_in', label:'Input level', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'mode', label:'Mode', type:'select', def:'downward', options:['downward','upward']},
+    {key:'range', label:'Range', type:'float', def:0.06125, min:0, max:1, step:0.001},
+    {key:'threshold', label:'Threshold', type:'float', def:0.125, min:0, max:1, step:0.001},
+    {key:'ratio', label:'Ratio', type:'float', def:2, min:1, max:9000, step:0.1},
+    {key:'attack', label:'Attack', type:'float', def:20, min:0.01, max:9000, step:0.1, unit:'ms'},
+    {key:'release', label:'Release', type:'float', def:250, min:0.01, max:9000, step:1, unit:'ms'},
+    {key:'makeup', label:'Makeup', type:'float', def:1, min:1, max:64, step:0.1},
+    {key:'knee', label:'Knee', type:'float', def:2.82843, min:1, max:8, step:0.01},
+    {key:'detection', label:'Detection', type:'select', def:'rms', options:['peak','rms']},
+    {key:'link', label:'Link', type:'select', def:'average', options:['average','maximum']},
+  ]});
+
+F({id:'alimiter', name:'Limiter', ffmpeg:'alimiter', cat:'dynamics',
+  desc:'Look-ahead brick-wall peak limiter.',
+  io:{ inputs:['in'], outputs:['out'] },
+  latency:(p)=>Math.max(0, p.attack||0), // treated as ms->samples at render (see NODE latency calc)
+  latencyIsMs:true, latencyAffectingParams:['attack'],
+  params:[
+    {key:'level_in', label:'Input level', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'level_out', label:'Output level', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'limit', label:'Limit', type:'float', def:1, min:0.0625, max:1, step:0.001},
+    {key:'attack', label:'Attack (look-ahead)', type:'float', def:5, min:0.1, max:80, step:0.1, unit:'ms'},
+    {key:'release', label:'Release', type:'float', def:50, min:1, max:8000, step:1, unit:'ms'},
+    {key:'asc', label:'ASC', type:'bool', def:false},
+    {key:'asc_level', label:'ASC level', type:'float', def:0.5, min:0, max:1, step:0.01},
+    {key:'level', label:'Auto-level', type:'bool', def:true},
+    {key:'latency', label:'Report latency (EOF flush)', type:'bool', def:false, desc:'Compensates the lookahead delay and flushes it at EOF.'},
+  ]});
+
+F({id:'sidechaincompress', name:'Sidechain Compressor', ffmpeg:'sidechaincompress', cat:'dynamics',
+  desc:'Compress the main input using a separate sidechain input.',
+  io:{ inputs:['main','sidechain'], outputs:['out'] },
+  mergeCheck:false, latency:()=>0,
+  params:[
+    {key:'level_in', label:'Input level', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'mode', label:'Mode', type:'select', def:'downward', options:['downward','upward']},
+    {key:'threshold', label:'Threshold', type:'float', def:0.125, min:0.000977, max:1, step:0.001},
+    {key:'ratio', label:'Ratio', type:'float', def:2, min:1, max:20, step:0.1},
+    {key:'attack', label:'Attack', type:'float', def:20, min:0.01, max:2000, step:0.1, unit:'ms'},
+    {key:'release', label:'Release', type:'float', def:250, min:0.01, max:9000, step:1, unit:'ms'},
+    {key:'makeup', label:'Makeup', type:'float', def:1, min:1, max:64, step:0.1},
+    {key:'knee', label:'Knee', type:'float', def:2.82843, min:1, max:8, step:0.01},
+    {key:'link', label:'Link', type:'select', def:'average', options:['average','maximum']},
+    {key:'detection', label:'Detection', type:'select', def:'rms', options:['peak','rms']},
+    {key:'level_sc', label:'Sidechain level', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'mix', label:'Mix', type:'float', def:1, min:0, max:1, step:0.01},
+  ]});
+
+F({id:'sidechaingate', name:'Sidechain Gate', ffmpeg:'sidechaingate', cat:'dynamics',
+  desc:'Gate the main input using a separate sidechain input.',
+  io:{ inputs:['main','sidechain'], outputs:['out'] },
+  mergeCheck:false, latency:()=>0,
+  params:[
+    {key:'level_in', label:'Input level', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'mode', label:'Mode', type:'select', def:'downward', options:['downward','upward']},
+    {key:'range', label:'Range', type:'float', def:0.06125, min:0, max:1, step:0.001},
+    {key:'threshold', label:'Threshold', type:'float', def:0.125, min:0, max:1, step:0.001},
+    {key:'ratio', label:'Ratio', type:'float', def:2, min:1, max:9000, step:0.1},
+    {key:'attack', label:'Attack', type:'float', def:20, min:0.01, max:9000, step:0.1, unit:'ms'},
+    {key:'release', label:'Release', type:'float', def:250, min:0.01, max:9000, step:1, unit:'ms'},
+    {key:'makeup', label:'Makeup', type:'float', def:1, min:1, max:64, step:0.1},
+    {key:'knee', label:'Knee', type:'float', def:2.82843, min:1, max:8, step:0.01},
+    {key:'detection', label:'Detection', type:'select', def:'rms', options:['peak','rms']},
+    {key:'link', label:'Link', type:'select', def:'average', options:['average','maximum']},
+    {key:'level_sc', label:'Sidechain level', type:'float', def:1, min:0.015625, max:64, step:0.01},
+  ]});
+
+F({id:'compand', name:'Compand', ffmpeg:'compand', cat:'dynamics',
+  desc:'Flexible attack/decay compression with an explicit look-ahead delay.',
+  io:{ inputs:['in'], outputs:['out'] },
+  latency:(p,sr)=>Math.round((p.delay||0)*sr),
+  latencyAffectingParams:['delay'],
+  params:[
+    {key:'attacks', label:'Attacks', type:'text', def:'0', desc:'seconds, per-channel list'},
+    {key:'decays', label:'Decays', type:'text', def:'0.8', desc:'seconds, per-channel list'},
+    {key:'points', label:'Points', type:'text', def:'-70/-70|-60/-20|1/0', desc:'dB transfer curve, in/out pairs'},
+    {key:'soft-knee', label:'Soft knee', type:'float', def:0.01, min:0, max:10, step:0.01},
+    {key:'gain', label:'Gain', type:'float', def:0, min:-900, max:900, step:0.1, unit:'dB'},
+    {key:'volume', label:'Initial volume', type:'float', def:0, min:-900, max:0, step:0.1, unit:'dB'},
+    {key:'delay', label:'Look-ahead delay', type:'float', def:0, min:0, max:20, step:0.001, unit:'s'},
+  ]});
+
+F({id:'dynaudnorm', name:'Dynamic Normalizer', ffmpeg:'dynaudnorm', cat:'dynamics',
+  desc:'Frame-based adaptive gain normalizer.',
+  io:{ inputs:['in'], outputs:['out'] },
+  latency:(p,sr)=>{
+    const frameMs = p.framelen!==undefined?p.framelen:500;
+    const g = p.gausssize!==undefined?p.gausssize:31;
+    return Math.round((frameMs/1000*sr) * ((g-1)/2));
+  },
+  latencyAffectingParams:['framelen','gausssize'],
+  latencyIsEstimate:true,
+  params:[
+    {key:'framelen', label:'Frame length', type:'int', def:500, min:10, max:8000, unit:'ms'},
+    {key:'gausssize', label:'Gauss window', type:'int', def:31, min:3, max:301, step:2},
+    {key:'peak', label:'Target peak', type:'float', def:0.95, min:0, max:1, step:0.01},
+    {key:'maxgain', label:'Max gain', type:'float', def:10, min:1, max:100, step:0.1},
+    {key:'targetrms', label:'Target RMS', type:'float', def:0, min:0, max:1, step:0.01, desc:'0 = disabled'},
+    {key:'coupling', label:'Channel coupling', type:'bool', def:true},
+    {key:'correctdc', label:'Correct DC', type:'bool', def:false},
+    {key:'altboundary', label:'Alt. boundary', type:'bool', def:false},
+    {key:'compress', label:'Compress factor', type:'float', def:0, min:0, max:30, step:0.1},
+    {key:'threshold', label:'Threshold', type:'float', def:0, min:0, max:1, step:0.01},
+    {key:'overlap', label:'Overlap', type:'float', def:0, min:0, max:0.95, step:0.01},
+  ]});
+
+F({id:'speechnorm', name:'Speech Normalizer', ffmpeg:'speechnorm', cat:'dynamics',
+  desc:'Peak-and-expansion based speech level normalizer.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0, latencyIsEstimate:true,
+  params:[
+    {key:'peak', label:'Peak', type:'float', def:0.95, min:0, max:1, step:0.01},
+    {key:'expansion', label:'Expansion', type:'float', def:2, min:1, max:50, step:0.1},
+    {key:'compression', label:'Compression', type:'float', def:2, min:1, max:50, step:0.1},
+    {key:'threshold', label:'Threshold', type:'float', def:0, min:0, max:1, step:0.01},
+    {key:'raise', label:'Raise', type:'float', def:0.001, min:0, max:1, step:0.0001},
+    {key:'fall', label:'Fall', type:'float', def:0.001, min:0, max:1, step:0.0001},
+    {key:'hold', label:'Hold', type:'int', def:0, min:0, max:2400},
+    {key:'invert', label:'Invert', type:'bool', def:false},
+    {key:'link', label:'Link channels', type:'bool', def:false},
+    {key:'rms', label:'RMS', type:'float', def:0, min:0, max:1, step:0.01},
+  ]});
+
+F({id:'deesser', name:'De-esser', ffmpeg:'deesser', cat:'dynamics',
+  desc:'Reduce sibilance in the upper frequency band.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'i', label:'Intensity', type:'float', def:0, min:0, max:1, step:0.01},
+    {key:'m', label:'Max reduction', type:'float', def:0.5, min:0, max:1, step:0.01},
+    {key:'f', label:'Freq. split', type:'float', def:0.5, min:0, max:1, step:0.01},
+    {key:'s', label:'Output', type:'select', def:'o', options:['i','o','e']},
+  ]});
+F({id:'aexciter', name:'Exciter', ffmpeg:'aexciter', cat:'dynamics',
+  desc:'Add harmonic distortion to brighten the top end ("crisp"/"brilliant" sound).',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'level_in', label:'Level in', type:'float', def:1, min:0, max:64, step:0.01},
+    {key:'level_out', label:'Level out', type:'float', def:1, min:0, max:64, step:0.01},
+    {key:'amount', label:'Amount', type:'float', def:1, min:0, max:64, step:0.01},
+    {key:'drive', label:'Drive', type:'float', def:8.5, min:0.1, max:10, step:0.1},
+    {key:'blend', label:'Blend (octave)', type:'float', def:0, min:-10, max:10, step:0.1},
+    {key:'freq', label:'Lower freq. limit', type:'float', def:7500, min:2000, max:12000, step:1, unit:'Hz'},
+    {key:'ceil', label:'Upper freq. limit', type:'float', def:9999, min:9999, max:20000, step:1, unit:'Hz'},
+    {key:'listen', label:'Listen (harmonics only)', type:'bool', def:false},
+  ]});
+F({id:'asoftclip', name:'Soft Clip', ffmpeg:'asoftclip', cat:'dynamics',
+  desc:'Distortion that saturates smoothly instead of hard-clipping.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'type', label:'Curve', type:'select', def:'tanh', options:['hard','tanh','atan','cubic','exp','alg','quintic','sin','erf']},
+    {key:'threshold', label:'Threshold', type:'float', def:1, min:0.01, max:1, step:0.01, unit:'linear (1=0dB)'},
+    {key:'output', label:'Output gain', type:'float', def:1, min:0.01, max:16, step:0.01, unit:'linear (1=0dB)'},
+    {key:'param', label:'Curve parameter', type:'float', def:1, min:0.01, max:3, step:0.01},
+    {key:'oversample', label:'Oversample', type:'select', def:'1', options:['1','2','4','8','16']},
+  ]});
+/* ---- EQ & Filters (biquad family - causal, effectively zero added latency) ---- */
+function widthTypeParam(def){ return {key:'width_type', label:'Width type', type:'select', def:def||'q', options:['h','q','o','s','k'], desc:'h=Hz q=Q o=octave s=slope k=kHz'}; }
+function commonBiquadTail(){
+  return [
+    {key:'mix', label:'Mix', type:'float', def:1, min:0, max:1, step:0.01},
+    {key:'channels', label:'Channels', type:'text', def:'all'},
+    {key:'normalize', label:'Normalize', type:'bool', def:false},
+    {key:'transform', label:'Transform', type:'select', def:'di', options:['di','dii','tdi','tdii','latt','svf','zdf']},
+    {key:'precision', label:'Precision', type:'select', def:'auto', options:['auto','s16','s32','f32','f64']},
+  ];
+}
+F({id:'equalizer', name:'Parametric EQ', ffmpeg:'equalizer', cat:'eq',
+  desc:'Single-band peaking equalizer.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'frequency', label:'Frequency', type:'float', def:1000, min:1, max:24000, step:1, unit:'Hz'},
+    widthTypeParam('q'),
+    {key:'width', label:'Width', type:'float', def:1, min:0.01, max:20, step:0.01},
+    {key:'gain', label:'Gain', type:'float', def:0, min:-24, max:24, step:0.1, unit:'dB'},
+    ...commonBiquadTail(),
+  ]});
+F({id:'bass', name:'Bass Shelf', ffmpeg:'bass', cat:'eq',
+  desc:'Low-shelf tone control.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'frequency', label:'Frequency', type:'float', def:100, min:1, max:24000, step:1, unit:'Hz'},
+    widthTypeParam('q'),
+    {key:'width', label:'Width', type:'float', def:0.5, min:0.01, max:20, step:0.01},
+    {key:'gain', label:'Gain', type:'float', def:0, min:-24, max:24, step:0.1, unit:'dB'},
+    {key:'poles', label:'Poles', type:'select', def:'2', options:['1','2']},
+    ...commonBiquadTail(),
+  ]});
+F({id:'treble', name:'Treble Shelf', ffmpeg:'treble', cat:'eq',
+  desc:'High-shelf tone control.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'frequency', label:'Frequency', type:'float', def:3000, min:1, max:24000, step:1, unit:'Hz'},
+    widthTypeParam('q'),
+    {key:'width', label:'Width', type:'float', def:0.5, min:0.01, max:20, step:0.01},
+    {key:'gain', label:'Gain', type:'float', def:0, min:-24, max:24, step:0.1, unit:'dB'},
+    {key:'poles', label:'Poles', type:'select', def:'2', options:['1','2']},
+    ...commonBiquadTail(),
+  ]});
+F({id:'highpass', name:'High-pass', ffmpeg:'highpass', cat:'eq',
+  desc:'Removes content below the cutoff frequency.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'frequency', label:'Cutoff', type:'float', def:3000, min:1, max:24000, step:1, unit:'Hz'},
+    widthTypeParam('q'),
+    {key:'width', label:'Width', type:'float', def:0.707, min:0.01, max:20, step:0.001},
+    {key:'poles', label:'Poles', type:'select', def:'2', options:['1','2']},
+    ...commonBiquadTail(),
+  ]});
+F({id:'lowpass', name:'Low-pass', ffmpeg:'lowpass', cat:'eq',
+  desc:'Removes content above the cutoff frequency.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'frequency', label:'Cutoff', type:'float', def:500, min:1, max:24000, step:1, unit:'Hz'},
+    widthTypeParam('q'),
+    {key:'width', label:'Width', type:'float', def:0.707, min:0.01, max:20, step:0.001},
+    {key:'poles', label:'Poles', type:'select', def:'2', options:['1','2']},
+    ...commonBiquadTail(),
+  ]});
+F({id:'bandpass', name:'Band-pass', ffmpeg:'bandpass', cat:'eq',
+  desc:'Passes only a band of frequencies.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'frequency', label:'Center', type:'float', def:3000, min:1, max:24000, step:1, unit:'Hz'},
+    widthTypeParam('q'),
+    {key:'width', label:'Width', type:'float', def:0.707, min:0.01, max:20, step:0.001},
+    {key:'csg', label:'Constant skirt', type:'bool', def:false},
+    ...commonBiquadTail(),
+  ]});
+F({id:'bandreject', name:'Band-reject', ffmpeg:'bandreject', cat:'eq',
+  desc:'Notches out a band of frequencies.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'frequency', label:'Center', type:'float', def:3000, min:1, max:24000, step:1, unit:'Hz'},
+    widthTypeParam('q'),
+    {key:'width', label:'Width', type:'float', def:0.707, min:0.01, max:20, step:0.001},
+    ...commonBiquadTail(),
+  ]});
+F({id:'allpass', name:'All-pass', ffmpeg:'allpass', cat:'eq',
+  desc:'Shifts phase without changing magnitude response.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'frequency', label:'Center', type:'float', def:3000, min:1, max:24000, step:1, unit:'Hz'},
+    widthTypeParam('q'),
+    {key:'width', label:'Width', type:'float', def:0.707, min:0.01, max:20, step:0.001},
+    {key:'order', label:'Order', type:'select', def:'2', options:['1','2']},
+    ...commonBiquadTail(),
+  ]});
+F({id:'biquad', name:'Raw Biquad', ffmpeg:'biquad', cat:'eq',
+  desc:'Manually specify raw biquad coefficients.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'a0', label:'a0', type:'float', def:1, min:-100, max:100, step:0.0001},
+    {key:'a1', label:'a1', type:'float', def:0, min:-100, max:100, step:0.0001},
+    {key:'a2', label:'a2', type:'float', def:0, min:-100, max:100, step:0.0001},
+    {key:'b0', label:'b0', type:'float', def:1, min:-100, max:100, step:0.0001},
+    {key:'b1', label:'b1', type:'float', def:0, min:-100, max:100, step:0.0001},
+    {key:'b2', label:'b2', type:'float', def:0, min:-100, max:100, step:0.0001},
+    ...commonBiquadTail(),
+  ]});
+F({id:'atilt', name:'Tilt EQ', ffmpeg:'atilt', cat:'eq',
+  desc:'Tilts spectral balance around a center frequency.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0, latencyIsEstimate:true,
+  params:[
+    {key:'freq', label:'Center', type:'float', def:10000, min:20, max:192000, step:1, unit:'Hz'},
+    {key:'slope', label:'Slope', type:'float', def:0, min:-1, max:1, step:0.01},
+    {key:'width', label:'Width', type:'float', def:1000, min:100, max:10000, step:1, unit:'Hz'},
+    {key:'order', label:'Order', type:'int', def:5, min:2, max:30},
+    {key:'level', label:'Level', type:'float', def:1, min:0, max:4, step:0.01},
+  ]});
+F({id:'asubcut', name:'Sub Cut', ffmpeg:'asubcut', cat:'eq',
+  desc:'Steep high-pass to remove sub-bass rumble.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'cutoff', label:'Cutoff', type:'float', def:20, min:2, max:200, step:1, unit:'Hz'},
+    {key:'order', label:'Order', type:'int', def:10, min:3, max:20},
+    {key:'level', label:'Level', type:'float', def:1, min:0, max:1, step:0.01},
+  ]});
+F({id:'asupercut', name:'Super Cut', ffmpeg:'asupercut', cat:'eq',
+  desc:'Steep low-pass to remove ultrasonic content.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'cutoff', label:'Cutoff', type:'float', def:20000, min:20000, max:192000, step:1, unit:'Hz'},
+    {key:'order', label:'Order', type:'int', def:10, min:3, max:20},
+    {key:'level', label:'Level', type:'float', def:1, min:0, max:1, step:0.01},
+  ]});
+F({id:'asuperpass', name:'Super Pass', ffmpeg:'asuperpass', cat:'eq',
+  desc:'Steep band-pass filter.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'centerf', label:'Center', type:'float', def:1000, min:2, max:999999, step:1, unit:'Hz'},
+    {key:'order', label:'Order', type:'int', def:4, min:4, max:20},
+    {key:'qfactor', label:'Q factor', type:'float', def:1, min:0.01, max:100, step:0.01},
+    {key:'level', label:'Level', type:'float', def:1, min:0, max:2, step:0.01},
+  ]});
+F({id:'asuperstop', name:'Super Stop', ffmpeg:'asuperstop', cat:'eq',
+  desc:'Steep band-stop / notch filter.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'centerf', label:'Center', type:'float', def:1000, min:2, max:999999, step:1, unit:'Hz'},
+    {key:'order', label:'Order', type:'int', def:4, min:4, max:20},
+    {key:'qfactor', label:'Q factor', type:'float', def:1, min:0.01, max:100, step:0.01},
+    {key:'level', label:'Level', type:'float', def:1, min:0, max:2, step:0.01},
+  ]});
+/* ---- Spectral / Restoration (STFT / windowed filters - these carry real algorithmic latency) ---- */
+F({id:'afftfilt', name:'FFT Filter', ffmpeg:'afftfilt', cat:'spectral',
+  desc:'Custom frequency-domain filter via real/imag expressions.',
+  io:{ inputs:['in'], outputs:['out'] },
+  latency:(p)=>p.win_size!==undefined?p.win_size:4096,
+  latencyAffectingParams:['win_size'],
+  params:[
+    {key:'real', label:'Real expr', type:'text', def:'1'},
+    {key:'imag', label:'Imag expr', type:'text', def:'1'},
+    {key:'win_size', label:'Window size', type:'select', def:4096,
+      options:[128,256,512,1024,2048,4096,8192,16384,32768]},
+    {key:'win_func', label:'Window fn.', type:'select', def:'hann',
+      options:['rect','hann','hamming','blackman','bartlett','welch','flattop','nuttall']},
+    {key:'overlap', label:'Overlap', type:'float', def:0.75, min:0, max:1, step:0.01},
+  ]});
+
+F({id:'afir', name:'Convolution (FIR)', ffmpeg:'afir', cat:'spectral',
+  desc:'Convolve with an impulse response (reverb, cab sims, ...).',
+  io:{ inputs:['in','ir'], outputs:['out'] }, latency:()=>0, latencyIsEstimate:true,
+  params:[
+    {key:'dry', label:'Dry', type:'float', def:0, min:0, max:10, step:0.01},
+    {key:'wet', label:'Wet', type:'float', def:1, min:0, max:10, step:0.01},
+    {key:'length', label:'IR length', type:'float', def:100, min:1, max:100, step:1, unit:'%'},
+    {key:'gtype', label:'Gain norm.', type:'select', def:'none', options:['none','peak','dc']},
+    {key:'irnorm', label:'IR norm.', type:'float', def:1, min:-1, max:2, step:0.01},
+    {key:'irlink', label:'IR link ch.', type:'bool', def:true},
+    {key:'maxir', label:'Max IR length', type:'float', def:30, min:0.1, max:60, step:0.1, unit:'s'},
+    {key:'response', label:'Show response', type:'bool', def:false},
+  ]});
+
+F({id:'aiir', name:'IIR Filter', ffmpeg:'aiir', cat:'spectral',
+  desc:'Custom IIR filter from arbitrary zeros/poles/gains.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'zeros', label:'Zeros (z)', type:'text', def:'1+0i 1-0i'},
+    {key:'poles', label:'Poles (p)', type:'text', def:'0.5+0i 0.5-0i'},
+    {key:'gains', label:'Gains (k)', type:'text', def:'1'},
+    {key:'format', label:'Format', type:'select', def:'zp', options:['ll','sf','zp','pr','pd']},
+    {key:'process', label:'Process', type:'select', def:'s', options:['s','p']},
+    {key:'precision', label:'Precision', type:'select', def:'auto', options:['auto','s16','s32','f32','f64']},
+    {key:'normalize', label:'Normalize', type:'bool', def:true},
+    {key:'mix', label:'Mix', type:'float', def:1, min:0, max:1, step:0.01},
+  ]});
+
+F({id:'afftdn', name:'FFT Denoiser', ffmpeg:'afftdn', cat:'spectral',
+  desc:'Spectral noise reduction (STFT-based).',
+  io:{ inputs:['in'], outputs:['out'] },
+  latency:()=>4096, latencyIsEstimate:true,
+  params:[
+    {key:'nr', label:'Noise reduction', type:'float', def:12, min:0.01, max:97, step:0.1, unit:'dB'},
+    {key:'nf', label:'Noise floor', type:'float', def:-50, min:-80, max:-20, step:1, unit:'dB'},
+    {key:'nt', label:'Noise type', type:'select', def:'w', options:['w','v','s']},
+    {key:'tn', label:'Track noise', type:'bool', def:false},
+    {key:'tr', label:'Track residual', type:'bool', def:false},
+    {key:'rf', label:'Residual floor', type:'float', def:-38, min:-80, max:-20, step:1, unit:'dB'},
+    {key:'om', label:'Output mode', type:'select', def:'o', options:['i','o','n']},
+  ]});
+
+F({id:'adeclick', name:'De-click', ffmpeg:'adeclick', cat:'spectral',
+  desc:'Remove impulsive clicks/pops (vinyl restoration).',
+  io:{ inputs:['in'], outputs:['out'] },
+  latency:(p,sr)=>Math.round((p.window!==undefined?p.window:55)/1000*sr),
+  latencyAffectingParams:['window'],
+  params:[
+    {key:'window', label:'Window', type:'float', def:55, min:10, max:100, step:1, unit:'ms'},
+    {key:'overlap', label:'Overlap', type:'float', def:75, min:50, max:95, step:1, unit:'%'},
+    {key:'arorder', label:'AR order', type:'float', def:2, min:0, max:25, step:0.1, unit:'%'},
+    {key:'threshold', label:'Threshold', type:'float', def:2, min:1, max:100, step:0.1},
+    {key:'burst', label:'Burst', type:'float', def:2, min:0, max:10, step:0.1, unit:'ms'},
+    {key:'method', label:'Method', type:'select', def:'a', options:['a','s']},
+  ]});
+
+F({id:'adeclip', name:'De-clip', ffmpeg:'adeclip', cat:'spectral',
+  desc:'Reconstruct clipped/overdriven samples.',
+  io:{ inputs:['in'], outputs:['out'] },
+  latency:(p,sr)=>Math.round((p.window!==undefined?p.window:55)/1000*sr),
+  latencyAffectingParams:['window'],
+  params:[
+    {key:'window', label:'Window', type:'float', def:55, min:10, max:100, step:1, unit:'ms'},
+    {key:'overlap', label:'Overlap', type:'float', def:75, min:50, max:95, step:1, unit:'%'},
+    {key:'arorder', label:'AR order', type:'float', def:8, min:0, max:25, step:0.1, unit:'%'},
+    {key:'threshold', label:'Threshold', type:'float', def:10, min:1, max:100, step:0.1},
+    {key:'hsize', label:'History size', type:'int', def:1000, min:100, max:9999},
+    {key:'method', label:'Method', type:'select', def:'a', options:['a','s']},
+  ]});
+
+F({id:'anlmdn', name:'Non-local Means Denoiser', ffmpeg:'anlmdn', cat:'spectral',
+  desc:'Denoise using non-local means (needs a research window).',
+  io:{ inputs:['in'], outputs:['out'] },
+  latency:(p,sr)=>Math.round((p.research!==undefined?p.research:0.006)*sr),
+  latencyAffectingParams:['research'],
+  params:[
+    {key:'strength', label:'Strength', type:'float', def:0.00001, min:0.00001, max:10000, step:0.00001},
+    {key:'patch', label:'Patch', type:'float', def:0.002, min:0.001, max:0.1, step:0.001, unit:'s'},
+    {key:'research', label:'Research', type:'float', def:0.006, min:0.002, max:0.3, step:0.001, unit:'s'},
+    {key:'output', label:'Output', type:'select', def:'o', options:['i','o','n']},
+    {key:'smooth', label:'Smooth', type:'float', def:11, min:1, max:1000, step:0.1},
+  ]});
+
+F({id:'arnndn', name:'RNN Denoiser', ffmpeg:'arnndn', cat:'spectral',
+  desc:'Recurrent-neural-network based noise removal.',
+  io:{ inputs:['in'], outputs:['out'] },
+  latency:(p,sr)=>Math.round(sr*0.01), latencyIsEstimate:true,
+  params:[
+    {key:'model', label:'Model path', type:'text', def:''},
+    {key:'mix', label:'Mix', type:'float', def:1, min:-1, max:1, step:0.01},
+  ]});
+/* ---- Modulation & Time ---- */
+F({id:'chorus', name:'Chorus', ffmpeg:'chorus', cat:'time',
+  desc:'Classic modulated-delay chorus (dry/wet mixed internally).',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'in_gain', label:'In gain', type:'float', def:0.4, min:0, max:1, step:0.01},
+    {key:'out_gain', label:'Out gain', type:'float', def:0.4, min:0, max:1, step:0.01},
+    {key:'delays', label:'Delays', type:'text', def:'55', unit:'ms'},
+    {key:'decays', label:'Decays', type:'text', def:'0.4'},
+    {key:'speeds', label:'Speeds', type:'text', def:'0.25', unit:'Hz'},
+    {key:'depths', label:'Depths', type:'text', def:'2', unit:'ms'},
+  ]});
+F({id:'flanger', name:'Flanger', ffmpeg:'flanger', cat:'time',
+  desc:'Modulated short delay with feedback.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'delay', label:'Delay', type:'float', def:0, min:0, max:30, step:0.1, unit:'ms'},
+    {key:'depth', label:'Depth', type:'float', def:2, min:0, max:10, step:0.1, unit:'ms'},
+    {key:'regen', label:'Feedback', type:'float', def:0, min:-95, max:95, step:1, unit:'%'},
+    {key:'width', label:'Width', type:'float', def:71, min:0, max:100, step:1, unit:'%'},
+    {key:'speed', label:'Speed', type:'float', def:0.5, min:0.1, max:10, step:0.1, unit:'Hz'},
+    {key:'shape', label:'Shape', type:'select', def:'sinusoidal', options:['triangular','sinusoidal']},
+    {key:'phase', label:'Phase', type:'float', def:25, min:0, max:100, step:1, unit:'%'},
+    {key:'interp', label:'Interpolation', type:'select', def:'linear', options:['linear','quadratic']},
+  ]});
+F({id:'aphaser', name:'Phaser', ffmpeg:'aphaser', cat:'time',
+  desc:'Sweeping notch-filter phase effect.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'in_gain', label:'In gain', type:'float', def:0.4, min:0, max:1, step:0.01},
+    {key:'out_gain', label:'Out gain', type:'float', def:0.74, min:0, max:1e9, step:0.01},
+    {key:'delay', label:'Delay', type:'float', def:3, min:0, max:5, step:0.1, unit:'ms'},
+    {key:'decay', label:'Decay', type:'float', def:0.4, min:0, max:0.99, step:0.01},
+    {key:'speed', label:'Speed', type:'float', def:0.5, min:0.1, max:2, step:0.01, unit:'Hz'},
+    {key:'type', label:'Type', type:'select', def:'triangular', options:['triangular','sinusoidal']},
+  ]});
+F({id:'tremolo', name:'Tremolo', ffmpeg:'tremolo', cat:'time',
+  desc:'Amplitude modulation.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'f', label:'Frequency', type:'float', def:5, min:0.1, max:20000, step:0.1, unit:'Hz'},
+    {key:'d', label:'Depth', type:'float', def:0.5, min:0, max:1, step:0.01},
+  ]});
+F({id:'vibrato', name:'Vibrato', ffmpeg:'vibrato', cat:'time',
+  desc:'Pitch modulation.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'f', label:'Frequency', type:'float', def:5, min:0.1, max:20000, step:0.1, unit:'Hz'},
+    {key:'d', label:'Depth', type:'float', def:0.5, min:0, max:1, step:0.01},
+  ]});
+F({id:'aecho', name:'Echo', ffmpeg:'aecho', cat:'time',
+  desc:'Discrete echo(es) mixed with the dry signal.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'in_gain', label:'In gain', type:'float', def:0.6, min:0, max:1, step:0.01},
+    {key:'out_gain', label:'Out gain', type:'float', def:0.3, min:0, max:1, step:0.01},
+    {key:'delays', label:'Delays', type:'text', def:'1000', unit:'ms'},
+    {key:'decays', label:'Decays', type:'text', def:'0.5'},
+  ]});
+F({id:'atempo', name:'Tempo', ffmpeg:'atempo', cat:'time',
+  desc:'Time-stretch without changing pitch (WSOLA-like).',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0, latencyIsEstimate:true,
+  params:[
+    {key:'tempo', label:'Tempo', type:'float', def:1.0, min:0.5, max:100, step:0.01},
+  ]});
+F({id:'rubberband', name:'Rubber Band', ffmpeg:'rubberband', cat:'time',
+  desc:'High quality pitch/time stretch (libRubberBand).',
+  io:{ inputs:['in'], outputs:['out'] },
+  latency:(p)=>({short:2048,standard:8192,long:32768}[p.window||'standard']||8192),
+  latencyAffectingParams:['window'], latencyIsEstimate:true,
+  params:[
+    {key:'tempo', label:'Tempo', type:'float', def:1, min:0.01, max:100, step:0.01},
+    {key:'pitch', label:'Pitch', type:'float', def:1, min:0.01, max:100, step:0.01},
+    {key:'transients', label:'Transients', type:'select', def:'crisp', options:['crisp','mixed','smooth']},
+    {key:'detector', label:'Detector', type:'select', def:'compound', options:['compound','percussive','soft']},
+    {key:'phase', label:'Phase', type:'select', def:'laminar', options:['laminar','independent']},
+    {key:'window', label:'Window', type:'select', def:'standard', options:['short','standard','long']},
+    {key:'smoothing', label:'Smoothing', type:'select', def:'off', options:['off','on']},
+    {key:'formant', label:'Formant', type:'select', def:'shifted', options:['shifted','preserved']},
+    {key:'pitchq', label:'Pitch quality', type:'select', def:'speed', options:['quality','speed','consistency']},
+    {key:'channels', label:'Channels', type:'select', def:'apart', options:['apart','together']},
+  ]});
+
+F({id:'apulsator', name:'Pulsator', ffmpeg:'apulsator', cat:'time',
+  desc:'Between an autopanner and a tremolo, driven by an LFO with a left/right phase offset.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'level_in', label:'Level in', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'level_out', label:'Level out', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'mode', label:'LFO shape', type:'select', def:'sine', options:['sine','triangle','square','sawup','sawdown']},
+    {key:'amount', label:'Amount', type:'float', def:1, min:0, max:1, step:0.01},
+    {key:'offset_l', label:'Left offset', type:'float', def:0, min:0, max:1, step:0.01},
+    {key:'offset_r', label:'Right offset', type:'float', def:0.5, min:0, max:1, step:0.01},
+    {key:'width', label:'Pulse width', type:'float', def:1, min:0, max:2, step:0.01},
+    {key:'timing', label:'Timing mode', type:'select', def:'hz', options:['bpm','ms','hz']},
+    {key:'bpm', label:'BPM', type:'float', def:120, min:30, max:300, step:1},
+    {key:'ms', label:'Milliseconds', type:'int', def:500, min:10, max:2000},
+    {key:'hz', label:'Frequency', type:'float', def:2, min:0.01, max:100, step:0.01, unit:'Hz'},
+  ]});
+
+/* ---- Spatial / Stereo ---- */
+F({id:'stereotools', name:'Stereo Tools', ffmpeg:'stereotools', cat:'spatial',
+  desc:'Swiss-army-knife stereo manipulation.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'level_in', label:'Level in', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'level_out', label:'Level out', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'balance_in', label:'Balance in', type:'float', def:0, min:-1, max:1, step:0.01},
+    {key:'balance_out', label:'Balance out', type:'float', def:0, min:-1, max:1, step:0.01},
+    {key:'softclip', label:'Soft clip', type:'bool', def:false},
+    {key:'mutel', label:'Mute L', type:'bool', def:false},
+    {key:'muter', label:'Mute R', type:'bool', def:false},
+    {key:'phasel', label:'Phase invert L', type:'bool', def:false},
+    {key:'phaser', label:'Phase invert R', type:'bool', def:false},
+    {key:'mode', label:'Mode', type:'select', def:'lr>lr', options:['lr>lr','lr>ms','ms>lr','lr>ll','lr>rr','lr>l+r','lr>rl','ms>ms']},
+    {key:'slev', label:'Side level', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'sbal', label:'Side balance', type:'float', def:0, min:-1, max:1, step:0.01},
+    {key:'mlev', label:'Mid level', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'mpan', label:'Mid pan', type:'float', def:0, min:-1, max:1, step:0.01},
+    {key:'base', label:'Stereo base', type:'float', def:0, min:-1, max:1, step:0.01},
+    {key:'delay', label:'Ch. delay', type:'float', def:0, min:-20, max:20, step:0.1, unit:'ms'},
+    {key:'sclevel', label:'Stereo center lvl', type:'float', def:1, min:0, max:1, step:0.01},
+    {key:'phase', label:'Phase', type:'float', def:0, min:0, max:360, step:1, unit:'deg'},
+  ]});
+F({id:'stereowiden', name:'Stereo Widen', ffmpeg:'stereowiden', cat:'spatial',
+  desc:'Widen stereo image via crossfeed & delay.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'delay', label:'Delay', type:'float', def:20, min:1, max:100, step:0.1, unit:'ms'},
+    {key:'feedback', label:'Feedback', type:'float', def:0.3, min:0, max:0.9, step:0.01},
+    {key:'crossfeed', label:'Crossfeed', type:'float', def:0.3, min:0, max:0.8, step:0.01},
+    {key:'drymix', label:'Dry mix', type:'float', def:0.8, min:0, max:1, step:0.01},
+  ]});
+F({id:'extrastereo', name:'Extra Stereo', ffmpeg:'extrastereo', cat:'spatial',
+  desc:'Linearly increases difference between L/R.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'m', label:'Factor', type:'float', def:2.5, min:-10, max:10, step:0.01},
+    {key:'c', label:'Clip', type:'bool', def:true},
+  ]});
+F({id:'crossfeed', name:'Crossfeed', ffmpeg:'crossfeed', cat:'spatial',
+  desc:'Headphone-to-speaker style crossfeed.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'strength', label:'Strength', type:'float', def:0.2, min:0, max:1, step:0.01},
+    {key:'range', label:'Range', type:'float', def:0.5, min:0, max:1, step:0.01},
+    {key:'slope', label:'Slope', type:'float', def:0.5, min:0.01, max:1, step:0.01},
+    {key:'level_in', label:'Level in', type:'float', def:0.9, min:0, max:1, step:0.01},
+    {key:'level_out', label:'Level out', type:'float', def:1, min:0, max:1, step:0.01},
+    {key:'block_size', label:'Block size', type:'int', def:0, min:0, max:32768},
+  ]});
+F({id:'haas', name:'Haas Widener', ffmpeg:'haas', cat:'spatial',
+  desc:'Psychoacoustic widening using the Haas effect.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'level_in', label:'Level in', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'level_out', label:'Level out', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'side_gain', label:'Side gain', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'middle_source', label:'Middle source', type:'select', def:'mid', options:['left','right','mid','side']},
+    {key:'middle_phase', label:'Middle phase', type:'bool', def:false},
+    {key:'left_delay', label:'Left delay', type:'float', def:2.05, min:0, max:40, step:0.01, unit:'ms'},
+    {key:'left_balance', label:'Left balance', type:'float', def:-1, min:-1, max:1, step:0.01},
+    {key:'left_gain', label:'Left gain', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'left_phase', label:'Left phase', type:'bool', def:false},
+    {key:'right_delay', label:'Right delay', type:'float', def:2.12, min:0, max:40, step:0.01, unit:'ms'},
+    {key:'right_balance', label:'Right balance', type:'float', def:1, min:-1, max:1, step:0.01},
+    {key:'right_gain', label:'Right gain', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'right_phase', label:'Right phase', type:'bool', def:false},
+  ]});
+F({id:'surround', name:'Surround Upmix', ffmpeg:'surround', cat:'spatial',
+  desc:'Upmix stereo to surround (e.g. 5.1).',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'chl_out', label:'Out layout', type:'text', def:'5.1'},
+    {key:'chl_in', label:'In layout', type:'text', def:'stereo'},
+    {key:'level_in', label:'Level in', type:'float', def:1, min:0, max:10, step:0.01},
+    {key:'level_out', label:'Level out', type:'float', def:1, min:0, max:10, step:0.01},
+    {key:'lfe', label:'LFE channel', type:'bool', def:true},
+    {key:'lfe_low', label:'LFE low', type:'int', def:128, min:0, max:256},
+    {key:'lfe_high', label:'LFE high', type:'int', def:256, min:0, max:384},
+    {key:'angle', label:'Front angle', type:'float', def:90, min:0, max:360, step:1, unit:'deg'},
+    {key:'focus', label:'Focus', type:'float', def:0, min:-1, max:1, step:0.01},
+    {key:'smooth', label:'Smooth', type:'float', def:0, min:0, max:1, step:0.01},
+  ]});
+F({id:'bs2b', name:'Bauer Stereophonic-to-Binaural', ffmpeg:'bs2b', cat:'spatial',
+  desc:'Headphone crossfeed emulating speakers.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'profile', label:'Profile', type:'select', def:'default', options:['default','cmoy','jmeier']},
+    {key:'fcut', label:'Cutoff', type:'int', def:0, min:0, max:2000, unit:'Hz (0=auto)'},
+    {key:'feed', label:'Feed', type:'int', def:0, min:0, max:150, unit:'0=auto'},
+  ]});
+F({id:'virtualbass', name:'Virtual Bass', ffmpeg:'virtualbass', cat:'spatial',
+  desc:'Psychoacoustic bass enhancement for small speakers.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'cutoff', label:'Cutoff', type:'float', def:250, min:100, max:500, step:1, unit:'Hz'},
+    {key:'strength', label:'Strength', type:'float', def:3, min:0.5, max:3, step:0.01},
+  ]});
+F({id:'asubboost', name:'Sub Boost', ffmpeg:'asubboost', cat:'spatial',
+  desc:'Boost sub-bass by generating harmonics.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'dry', label:'Dry', type:'float', def:1, min:0, max:1, step:0.01},
+    {key:'wet', label:'Wet', type:'float', def:1, min:0, max:1, step:0.01},
+    {key:'boost', label:'Boost', type:'float', def:2, min:1, max:12, step:0.01},
+    {key:'decay', label:'Decay', type:'float', def:0, min:0, max:1, step:0.01},
+    {key:'feedback', label:'Feedback', type:'float', def:0.9, min:0, max:1, step:0.01},
+    {key:'cutoff', label:'Cutoff', type:'float', def:100, min:50, max:900, step:1, unit:'Hz'},
+    {key:'slope', label:'Slope', type:'float', def:0.5, min:0.0001, max:1, step:0.0001},
+    {key:'delay', label:'Delay', type:'float', def:20, min:1, max:100, step:0.1, unit:'ms'},
+    {key:'channels', label:'Channels', type:'text', def:'all'},
+  ]});
+F({id:'crystalizer', name:'Crystalizer', ffmpeg:'crystalizer', cat:'spatial',
+  desc:'Enhance high frequency transients ("crisp" effect).',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'i', label:'Intensity', type:'float', def:2, min:-10, max:10, step:0.01},
+    {key:'c', label:'Clip', type:'bool', def:true},
+  ]});
+/* ---- Levels & Analysis ---- */
+F({id:'volume', name:'Volume', ffmpeg:'volume', cat:'level',
+  desc:'Static or expression-based gain change.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'volume', label:'Volume', type:'text', def:'1.0', desc:'linear e.g. 1.0, or "3dB", or an expression'},
+    {key:'precision', label:'Precision', type:'select', def:'float', options:['fixed','float','double']},
+    {key:'eval', label:'Eval', type:'select', def:'once', options:['once','frame']},
+    {key:'replaygain', label:'ReplayGain', type:'select', def:'drop', options:['drop','ignore','track','album']},
+    {key:'replaygain_preamp', label:'RG preamp', type:'float', def:0, min:-15, max:15, step:0.1, unit:'dB'},
+    {key:'replaygain_noclip', label:'RG no-clip', type:'bool', def:true},
+  ]});
+F({id:'loudnorm', name:'Loudness Normalize', ffmpeg:'loudnorm', cat:'level',
+  desc:'EBU R128 loudness normalization.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0, latencyIsEstimate:true,
+  params:[
+    {key:'I', label:'Integrated', type:'float', def:-24, min:-70, max:-5, step:0.1, unit:'LUFS'},
+    {key:'LRA', label:'Loudness range', type:'float', def:7, min:1, max:50, step:0.1, unit:'LU'},
+    {key:'TP', label:'True peak', type:'float', def:-2, min:-9, max:0, step:0.1, unit:'dBTP'},
+    {key:'linear', label:'Linear mode', type:'bool', def:true},
+    {key:'dual_mono', label:'Dual mono', type:'bool', def:false},
+    {key:'print_format', label:'Print format', type:'select', def:'none', options:['none','json','summary']},
+  ]});
+F({id:'astats', name:'Stats', ffmpeg:'astats', cat:'level',
+  desc:'Measure per-frame audio statistics (passthrough).',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'length', label:'Window length', type:'float', def:0.05, min:0, max:10, step:0.01, unit:'s'},
+    {key:'metadata', label:'Set metadata', type:'bool', def:false},
+    {key:'reset', label:'Reset every', type:'int', def:0, min:0, max:100000, unit:'frames (0=never)'},
+    {key:'measure_perchannel', label:'Per-channel', type:'text', def:'all'},
+    {key:'measure_overall', label:'Overall', type:'text', def:'all'},
+  ]});
+F({id:'volumedetect', name:'Volume Detect', ffmpeg:'volumedetect', cat:'level',
+  desc:'Reports mean/max volume to the log (passthrough).',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0, params:[]});
+F({id:'silencedetect', name:'Silence Detect', ffmpeg:'silencedetect', cat:'level',
+  desc:'Detects silence and logs it (passthrough).',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'noise', label:'Noise floor', type:'float', def:-60, min:-120, max:0, step:1, unit:'dB'},
+    {key:'duration', label:'Min duration', type:'float', def:2, min:0, max:60, step:0.1, unit:'s'},
+    {key:'mono', label:'Per-channel', type:'bool', def:false},
+  ]});
+F({id:'silenceremove', name:'Silence Remove', ffmpeg:'silenceremove', cat:'level',
+  desc:'Trims or removes silence from the stream.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'start_periods', label:'Start periods', type:'int', def:0, min:0, max:100},
+    {key:'start_duration', label:'Start duration', type:'float', def:0, min:0, max:60, step:0.01, unit:'s'},
+    {key:'start_threshold', label:'Start threshold', type:'float', def:0, min:0, max:1, step:0.001},
+    {key:'stop_periods', label:'Stop periods', type:'int', def:0, min:-100, max:100},
+    {key:'stop_duration', label:'Stop duration', type:'float', def:0, min:0, max:60, step:0.01, unit:'s'},
+    {key:'stop_threshold', label:'Stop threshold', type:'float', def:0, min:0, max:1, step:0.001},
+    {key:'detection', label:'Detection', type:'select', def:'rms', options:['peak','rms']},
+    {key:'window', label:'Window', type:'float', def:0.02, min:0, max:1, step:0.001, unit:'s'},
+  ]});
+
+/* ---- Utility ---- */
+F({id:'aformat', name:'Format', ffmpeg:'aformat', cat:'util',
+  desc:'Constrain sample format / rate / layout.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'sample_fmts', label:'Sample fmts', type:'text', def:''},
+    {key:'sample_rates', label:'Sample rates', type:'text', def:''},
+    {key:'channel_layouts', label:'Layouts', type:'text', def:''},
+  ]});
+F({id:'aresample', name:'Resample', ffmpeg:'aresample', cat:'util',
+  desc:'Change sample rate / resampling engine.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0, latencyIsEstimate:true,
+  params:[
+    {key:'sample_rate', label:'Sample rate', type:'int', def:0, min:0, max:768000, desc:'0 = unchanged', unit:'Hz'},
+    {key:'resampler', label:'Engine', type:'select', def:'swr', options:['swr','soxr']},
+    {key:'async', label:'Async (max stretch)', type:'int', def:0, min:0, max:100000, desc:'max samples/sec of stretch for A/V sync, 0=disabled'},
+  ]});
+F({id:'apad', name:'Pad', ffmpeg:'apad', cat:'util',
+  desc:'Pad the end of the stream with silence.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'pad_len', label:'Pad length', type:'int', def:-1, min:-1, max:1e9, unit:'samples'},
+    {key:'whole_len', label:'Whole length', type:'int', def:-1, min:-1, max:1e9, unit:'samples'},
+    {key:'pad_dur', label:'Pad duration', type:'float', def:0, min:0, max:3600, step:0.1, unit:'s'},
+    {key:'whole_dur', label:'Whole duration', type:'float', def:0, min:0, max:3600, step:0.1, unit:'s'},
+  ]});
+F({id:'atrim', name:'Trim', ffmpeg:'atrim', cat:'util',
+  desc:'Trim the stream to a time/sample range.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'start', label:'Start', type:'float', def:-1, min:-1, max:1e6, step:0.01, unit:'s'},
+    {key:'end', label:'End', type:'float', def:-1, min:-1, max:1e6, step:0.01, unit:'s'},
+    {key:'start_pts', label:'Start (pts/samples)', type:'int', def:-1, min:-1, max:1e12},
+    {key:'end_pts', label:'End (pts/samples)', type:'int', def:-1, min:-1, max:1e12},
+    {key:'duration', label:'Max duration', type:'float', def:0, min:0, max:1e6, step:0.01, unit:'s'},
+    {key:'start_sample', label:'Start sample', type:'int', def:-1, min:-1, max:1e9},
+    {key:'end_sample', label:'End sample', type:'int', def:-1, min:-1, max:1e9},
+  ]});
+F({id:'areverse', name:'Reverse', ffmpeg:'areverse', cat:'util',
+  desc:'Reverse the audio (whole-buffer, not real-time safe).',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0, params:[]});
+F({id:'pan', name:'Pan / Downmix', ffmpeg:'pan', cat:'util',
+  desc:'Explicit channel mixing / panning matrix.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'args', label:'Layout & mix', type:'text', def:'stereo|c0=c0|c1=c1',
+      desc:'out_layout|out_ch=expr|...'},
+  ]});
+F({id:'channelmap', name:'Channel Map', ffmpeg:'channelmap', cat:'util',
+  desc:'Remap input channels to arbitrary output channels.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'map', label:'Map', type:'text', def:'', desc:'e.g. 0-1|1-0 to swap L/R'},
+    {key:'channel_layout', label:'Out layout', type:'text', def:''},
+  ]});
+F({id:'dcshift', name:'DC Shift', ffmpeg:'dcshift', cat:'util',
+  desc:'Apply / remove a DC offset.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'shift', label:'Shift', type:'float', def:0, min:-1, max:1, step:0.001},
+    {key:'limitergain', label:'Limiter gain', type:'float', def:0, min:0, max:1, step:0.001},
+  ]});
+F({id:'acrusher', name:'Bitcrusher', ffmpeg:'acrusher', cat:'util',
+  desc:'Reduce bit depth / sample rate for lo-fi effects.',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
+  params:[
+    {key:'level_in', label:'Level in', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'level_out', label:'Level out', type:'float', def:1, min:0.015625, max:64, step:0.01},
+    {key:'bits', label:'Bits', type:'float', def:8, min:1, max:64, step:0.1},
+    {key:'mix', label:'Mix', type:'float', def:0.5, min:0, max:1, step:0.01},
+    {key:'mode', label:'Mode', type:'select', def:'lin', options:['lin','log']},
+    {key:'dc', label:'DC', type:'float', def:1, min:0.25, max:4, step:0.01},
+    {key:'aa', label:'Anti-alias', type:'float', def:0.5, min:0, max:1, step:0.01},
+    {key:'samples', label:'Sample reduction', type:'float', def:1, min:1, max:250, step:1},
+    {key:'lfo', label:'LFO', type:'bool', def:false},
+    {key:'lforange', label:'LFO range', type:'float', def:20, min:1, max:250, step:1},
+    {key:'lforate', label:'LFO rate', type:'float', def:0.5, min:0.01, max:20, step:0.01, unit:'Hz'},
+  ]});
+F({id:'earwax', name:'Earwax', ffmpeg:'earwax', cat:'util',
+  desc:'Makes headphone audio sound like speaker audio (8-channel trick).',
+  io:{ inputs:['in'], outputs:['out'] }, latency:()=>0, params:[]});
+
+/* ---------------------------------------------------------------------
+   Build lookup maps
+   ------------------------------------------------------------------- */
+const FILTER_MAP = Object.fromEntries(FILTERS.map(f=>[f.id,f]));
+function getDef(filterId){ return FILTER_MAP[filterId]; }
+
+/* ---------------------------------------------------------------------
+   2. STATE & CORE GRAPH MODEL
+   ------------------------------------------------------------------- */
+const state = {
+  sampleRate: 48000,
+  nodes: new Map(),   // id -> node
+  links: new Map(),   // id -> link
+  nextNodeId: 1,
+  nextLinkId: 1,
+  selectedNodeIds: new Set(),
+  selectedLinkId: null,
+  pan: {x:0, y:0},
+  scale: 1,
+};
+
+function newNodeId(){ return 'n' + (state.nextNodeId++); }
+function newLinkId(){ return 'l' + (state.nextLinkId++); }
+
+// number of input/output sockets a node currently has
+function numInputs(node){
+  const def = getDef(node.filterId);
+  const io = def.io.inputs;
+  if (Array.isArray(io)) return io.length;
+  return node.numInputs!==undefined ? node.numInputs : io.def;
+}
+function numOutputs(node){
+  const def = getDef(node.filterId);
+  const io = def.io.outputs;
+  if (Array.isArray(io)) return io.length;
+  return node.numOutputs!==undefined ? node.numOutputs : io.def;
+}
+function inputLabel(node, idx){
+  const def = getDef(node.filterId);
+  const io = def.io.inputs;
+  if (Array.isArray(io)) return io[idx] || ('in'+idx);
+  return (io.label||'in') + (idx+1);
+}
+function outputLabel(node, idx){
+  const def = getDef(node.filterId);
+  const io = def.io.outputs;
+  if (Array.isArray(io)) return io[idx] || ('out'+idx);
+  return (io.label||'out') + (idx+1);
+}
+function isDynamicInput(node){ return !Array.isArray(getDef(node.filterId).io.inputs); }
+function isDynamicOutput(node){ return !Array.isArray(getDef(node.filterId).io.outputs); }
+
+function defaultParams(def){
+  const p = {};
+  for (const spec of def.params) p[spec.key] = spec.def;
+  return p;
+}
+
+function createNode(filterId, x, y){
+  const def = getDef(filterId);
+  if (!def) { console.error('Unknown filter id', filterId); return null; }
+  const node = {
+    id: newNodeId(),
+    filterId,
+    x: Math.round(x), y: Math.round(y),
+    collapsed: false,
+    params: defaultParams(def),
+    numInputs: isDynamicInput({filterId}) ? def.io.inputs.def : undefined,
+    numOutputs: isDynamicOutput({filterId}) ? def.io.outputs.def : undefined,
+    latencyManual: false,
+    latencySamples: 0,
+    isCompensation: false,
+    // computed each recompute():
+    _inLatencies: [],   // per input socket: {samples, ok} or null if unconnected
+    _outLatency: null,  // samples at each output (single number, all outputs share it)
+    _mismatch: null,    // {maxLatency, entries:[{idx,label,latency,diff}]}
+    _unreached: true,   // true if not reachable from a source (no latency data)
+  };
+  state.nodes.set(node.id, node);
+  return node;
+}
+
+function deleteNode(nodeId){
+  // remove any links touching this node
+  for (const [lid, link] of Array.from(state.links.entries())){
+    if (link.from.node===nodeId || link.to.node===nodeId) state.links.delete(lid);
+  }
+  state.nodes.delete(nodeId);
+  state.selectedNodeIds.delete(nodeId);
+}
+
+function findLinkTo(nodeId, socketIdx){
+  for (const link of state.links.values()){
+    if (link.to.node===nodeId && link.to.socket===socketIdx) return link;
+  }
+  return null;
+}
+function findLinksFrom(nodeId, socketIdx){
+  const out = [];
+  for (const link of state.links.values()){
+    if (link.from.node===nodeId && link.from.socket===socketIdx) out.push(link);
+  }
+  return out;
+}
+
+// create a link, removing any existing link into the destination input socket
+// (an input can only carry one connection; an output can fan out to many).
+function createLink(fromNode, fromSocket, toNode, toSocket){
+  if (fromNode===toNode) return null; // no self loops
+  const existing = findLinkTo(toNode, toSocket);
+  if (existing) state.links.delete(existing.id);
+  const id = newLinkId();
+  const link = { id, from:{node:fromNode, socket:fromSocket}, to:{node:toNode, socket:toSocket} };
+  state.links.set(id, link);
+  return link;
+}
+function deleteLink(linkId){
+  state.links.delete(linkId);
+  if (state.selectedLinkId===linkId) state.selectedLinkId = null;
+}
+
+function clearGraph(){
+  state.nodes.clear();
+  state.links.clear();
+  state.selectedNodeIds.clear();
+  state.selectedLinkId = null;
+  state.nextNodeId = 1;
+  state.nextLinkId = 1;
+}
+
+/* ---------------------------------------------------------------------
+   3. LATENCY ENGINE
+   Every source contributes 0 samples of latency at t=0. Each filter node
+   adds its own algorithmic latency (constant-for-given-params buffering
+   delay) on top of whatever arrives at its input. At a node that combines
+   several program streams into one (amix / amerge / join / acrossfade),
+   if the incoming streams don't share the same accumulated latency, the
+   samples that reach the mixer at "the same instant" actually originated
+   at different points in time on each path -> comb filtering / phase
+   cancellation on shared content, exactly like the dry+wet example in
+   the prompt. We detect that and offer a one-click fix that inserts a
+   Delay node (adelay) on the shorter path(s).
+   ------------------------------------------------------------------- */
+
+function nodeOwnLatencySamples(node){
+  const def = getDef(node.filterId);
+  if (node.latencyManual) return Math.max(0, Math.round(node.latencySamples||0));
+  let raw = 0;
+  try { raw = def.latency ? def.latency(node.params, state.sampleRate) : 0; }
+  catch(e){ raw = 0; }
+  if (!isFinite(raw) || raw<0) raw = 0;
+  if (def.latencyIsMs) raw = raw/1000*state.sampleRate;
+  return Math.round(raw);
+}
+
+// Kahn's algorithm topological sort. Returns {order, cyclic:Set(nodeIds)}.
+function topoSort(){
+  const indeg = new Map();
+  const adj = new Map(); // nodeId -> [nodeId,...]
+  for (const id of state.nodes.keys()){ indeg.set(id, 0); adj.set(id, []); }
+  for (const link of state.links.values()){
+    if (!state.nodes.has(link.from.node) || !state.nodes.has(link.to.node)) continue;
+    adj.get(link.from.node).push(link.to.node);
+    indeg.set(link.to.node, (indeg.get(link.to.node)||0) + 1);
+  }
+  const queue = [];
+  for (const [id,d] of indeg) if (d===0) queue.push(id);
+  const order = [];
+  const indegWork = new Map(indeg);
+  while (queue.length){
+    const id = queue.shift();
+    order.push(id);
+    for (const next of adj.get(id)){
+      indegWork.set(next, indegWork.get(next)-1);
+      if (indegWork.get(next)===0) queue.push(next);
+    }
+  }
+  const cyclic = new Set();
+  if (order.length !== state.nodes.size){
+    const inOrder = new Set(order);
+    for (const id of state.nodes.keys()) if (!inOrder.has(id)) cyclic.add(id);
+  }
+  return { order, cyclic };
+}
+
+function msFromSamples(samples){ return samples/state.sampleRate*1000; }
+
+function fmtSamples(samples){
+  if (samples===null||samples===undefined) return '\u2014';
+  return Math.round(samples).toLocaleString();
+}
+function fmtMs(samples){
+  if (samples===null||samples===undefined) return '\u2014';
+  const ms = msFromSamples(samples);
+  return (ms<10? ms.toFixed(2) : ms<100? ms.toFixed(1) : ms.toFixed(0)) + ' ms';
+}
+
+// Main recompute pass. Mutates each node's _inLatencies / _outLatency /
+// _mismatch / _unreached / latencySamples(if not manual).
+function recomputeLatency(){
+  const { order, cyclic } = topoSort();
+
+  for (const node of state.nodes.values()){
+    node._inLatencies = [];
+    node._outLatency = null;
+    node._mismatch = null;
+    node._unreached = true;
+  }
+
+  for (const nodeId of order){
+    const node = state.nodes.get(nodeId);
+    const def = getDef(node.filterId);
+    const nIn = numInputs(node);
+    const inLat = [];
+    for (let i=0;i<nIn;i++){
+      const link = findLinkTo(nodeId, i);
+      if (!link){ inLat.push(null); continue; }
+      const upstream = state.nodes.get(link.from.node);
+      if (!upstream || upstream._outLatency===null){ inLat.push(null); continue; }
+      inLat.push(upstream._outLatency);
+    }
+    node._inLatencies = inLat;
+
+    const connected = inLat.filter(v=>v!==null);
+    const isSource = Array.isArray(def.io.inputs) && def.io.inputs.length===0;
+
+    if (isSource){
+      node._outLatency = 0;
+      node._unreached = false;
+    } else if (connected.length===0){
+      node._outLatency = null;   // nothing feeds this node yet
+      node._unreached = true;
+    } else {
+      const maxIn = Math.max(...connected);
+      node._unreached = false;
+      if (!node.latencyManual) node.latencySamples = nodeOwnLatencySamples(node);
+      const own = node.latencyManual ? Math.max(0,Math.round(node.latencySamples||0)) : node.latencySamples;
+      node._outLatency = maxIn + own;
+
+      if (def.mergeCheck && connected.length>=2){
+        const diffSpread = Math.max(...connected) - Math.min(...connected);
+        if (diffSpread > 0){
+          const entries = [];
+          for (let i=0;i<nIn;i++){
+            if (inLat[i]===null) continue;
+            entries.push({ idx:i, label:inputLabel(node,i), latency:inLat[i], diff:maxIn-inLat[i] });
+          }
+          node._mismatch = { maxLatency:maxIn, entries };
+        }
+      }
+    }
+  }
+
+  // nodes involved in a cycle: mark clearly, no latency data
+  for (const id of cyclic){
+    const node = state.nodes.get(id);
+    node._outLatency = null;
+    node._unreached = true;
+    node._cyclic = true;
+  }
+  for (const node of state.nodes.values()) if (!cyclic.has(node.id)) node._cyclic = false;
+
+  return { order, cyclic };
+}
+
+// Insert a Delay (adelay) node on the link feeding `toNode`'s input `toSocket`,
+// sized to add exactly `addSamples` of latency so its path lines up with the
+// slowest path feeding the same merge node.
+function insertCompensationDelay(toNode, toSocket, addSamples){
+  const link = findLinkTo(toNode, toSocket);
+  if (!link) return null;
+  const upstream = state.nodes.get(link.from.node);
+  const downstream = state.nodes.get(toNode);
+  if (!upstream || !downstream) return null;
+
+  const delayMs = addSamples/state.sampleRate*1000;
+  const midX = Math.round((upstream.x + 260 + downstream.x)/2);
+  const midY = Math.round((upstream.y + downstream.y)/2) + 40;
+
+  const node = createNode('adelay', midX, midY);
+  node.isCompensation = true;
+  node.params.delays = (Math.round(delayMs*1e6)/1e6).toString();
+  node.params.all = true;
+  node.latencyManual = true;           // lock to the exact sample count we solved for
+  node.latencySamples = addSamples;
+
+  deleteLink(link.id);
+  createLink(link.from.node, link.from.socket, node.id, 0);
+  createLink(node.id, 0, toNode, toSocket);
+  return node;
+}
+
+function autoCompensate(mixNodeId){
+  const node = state.nodes.get(mixNodeId);
+  if (!node || !node._mismatch) return [];
+  const created = [];
+  // snapshot before we start mutating links/nodes underneath the mismatch entries
+  for (const entry of node._mismatch.entries){
+    if (entry.diff > 0){
+      const n = insertCompensationDelay(mixNodeId, entry.idx, entry.diff);
+      if (n) created.push(n);
+    }
+  }
+  return created;
+}
+
+/* ---------------------------------------------------------------------
+   4. RENDERING
+   ------------------------------------------------------------------- */
+const viewportEl = document.getElementById('viewport');
+const worldEl = document.getElementById('world');
+const linksSvg = document.getElementById('linksSvg');
+const NODE_WIDTH = 240;
+
+const nodeEls = new Map(); // nodeId -> root element
+
+function applyWorldTransform(){
+  worldEl.style.transform = `translate(${state.pan.x}px, ${state.pan.y}px) scale(${state.scale})`;
+  // gridLayer lives in screen space (a fixed-size sibling, not a transformed
+  // child), so its dot spacing/offset are recomputed to *look* like part of
+  // world space at the current pan/zoom - this way the grid never runs out
+  // however far the user pans, unlike a finite transformed element would.
+  const gridEl = document.getElementById('gridLayer');
+  const major = 200*state.scale, minor = 40*state.scale;
+  gridEl.style.backgroundSize = `${major}px ${major}px, ${minor}px ${minor}px`;
+  gridEl.style.backgroundPosition = `${state.pan.x}px ${state.pan.y}px, ${state.pan.x}px ${state.pan.y}px`;
+  document.getElementById('zoomLabel').textContent = Math.round(state.scale*100)+'%';
+}
+
+function screenToWorld(clientX, clientY){
+  const r = viewportEl.getBoundingClientRect();
+  return {
+    x: (clientX - r.left - state.pan.x) / state.scale,
+    y: (clientY - r.top  - state.pan.y) / state.scale,
+  };
+}
+
+function fmtParamValue(spec, val){
+  if (spec.type==='bool') return val ? 'on' : 'off';
+  if (val===undefined || val===null || val==='') return '';
+  return val;
+}
+
+function paramControlHTML(node, spec){
+  const val = node.params[spec.key];
+  const id = `p_${node.id}_${spec.key}`;
+  if (spec.type==='bool'){
+    return `<input type="checkbox" id="${id}" data-pkey="${spec.key}" ${val?'checked':''}>`;
+  }
+  if (spec.type==='select'){
+    const opts = spec.options.map(o=>`<option value="${o}" ${String(o)===String(val)?'selected':''}>${o}</option>`).join('');
+    return `<select id="${id}" data-pkey="${spec.key}">${opts}</select>`;
+  }
+  if (spec.type==='int' || spec.type==='float'){
+    const step = spec.step!==undefined?spec.step:(spec.type==='int'?1:0.01);
+    const minAttr = spec.min!==undefined?`min="${spec.min}"`:'';
+    const maxAttr = spec.max!==undefined?`max="${spec.max}"`:'';
+    return `<input type="number" id="${id}" data-pkey="${spec.key}" value="${val}" step="${step}" ${minAttr} ${maxAttr}>`;
+  }
+  // text
+  return `<input type="text" id="${id}" data-pkey="${spec.key}" value="${escapeAttr(val)}">`;
+}
+
+function escapeAttr(s){
+  return String(s===undefined||s===null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+}
+function escapeHtml(s){
+  return String(s===undefined||s===null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function nodeHeaderColor(node){
+  const def = getDef(node.filterId);
+  return CAT_MAP[def.cat] ? CAT_MAP[def.cat].color : '#555';
+}
+
+function ioRowsHTML(node){
+  const def = getDef(node.filterId);
+  const nIn = numInputs(node), nOut = numOutputs(node);
+  const rows = Math.max(nIn, nOut, 1);
+  let html = '';
+  for (let i=0;i<rows;i++){
+    const hasIn = i<nIn, hasOut = i<nOut;
+    html += `<div class="io-row">`;
+    if (hasIn){
+      html += `<div class="socket in" data-node="${node.id}" data-side="in" data-index="${i}"></div>`;
+      html += `<div class="io-label">${escapeHtml(inputLabel(node,i))}</div>`;
+    } else { html += `<div style="width:9px"></div><div class="io-label"></div>`; }
+    html += `<div class="iospacer"></div>`;
+    if (hasOut){
+      html += `<div class="io-label">${escapeHtml(outputLabel(node,i))}</div>`;
+      html += `<div class="socket out" data-node="${node.id}" data-side="out" data-index="${i}"></div>`;
+    }
+    html += `</div>`;
+  }
+  // dynamic +/- controls
+  if (isDynamicInput(node) || isDynamicOutput(node)){
+    const dynDef = isDynamicInput(node) ? def.io.inputs : def.io.outputs;
+    const cur = isDynamicInput(node) ? nIn : nOut;
+    html += `<div class="io-row" style="justify-content:flex-end;">
+      <div class="io-dynbtns">
+        <button data-act="io-dec" title="Remove socket">\u2212</button>
+        <button data-act="io-inc" title="Add socket">+</button>
+      </div>
+    </div>`;
+  }
+  return html;
+}
+
+function latencyRowHTML(node){
+  const samples = node._unreached ? null : node._outLatency;
+  const msLabel = samples===null ? '\u2014' : fmtMs(samples);
+  return `
+    <div class="latrow">
+      <span title="Algorithmic latency this filter adds, in samples. Auto-estimated from its parameters \u2014 edit to override with a measured value.">\u23F1</span>
+      <input class="latin" type="number" min="0" step="1" data-role="latency-override" value="${Math.round(node.latencySamples||0)}">
+      <span class="latms">${msLabel}${node.latencyManual?' \u00b7 manual':''}${(getDef(node.filterId).latencyIsEstimate)?' \u00b7 est.':''}</span>
+      <button data-act="reset-latency" title="Reset to auto-estimated latency">\u21ba</button>
+    </div>`;
+}
+
+function mismatchBoxHTML(node){
+  if (!node._mismatch) return '';
+  const lines = node._mismatch.entries.map(e=>{
+    if (e.diff<=0) return `<div class="mline">${escapeHtml(e.label)}: ${fmtSamples(e.latency)} smp (reference)</div>`;
+    return `<div class="mline">${escapeHtml(e.label)}: ${fmtSamples(e.latency)} smp \u2014 needs +${fmtSamples(e.diff)} smp (${fmtMs(e.diff)})</div>`;
+  }).join('');
+  return `<div class="mismatch-box">
+    <div class="mtitle">\u26a0 Phase-alignment issue</div>
+    <div class="mline">Inputs arrive with different accumulated latency \u2014 summing them will cause comb-filtering / phase cancellation on shared content.</div>
+    ${lines}
+    <button class="mfix" data-act="auto-compensate">Insert delay node(s) to align</button>
+  </div>`;
+}
+
+function buildNodeElement(node){
+  const def = getDef(node.filterId);
+  const el = document.createElement('div');
+  el.className = 'node';
+  el.dataset.id = node.id;
+  el.style.width = NODE_WIDTH+'px';
+  renderNodeInner(el, node);
+  return el;
+}
+
+function renderNodeInner(el, node){
+  const def = getDef(node.filterId);
+  const color = nodeHeaderColor(node);
+  el.classList.toggle('collapsed', !!node.collapsed);
+  el.classList.toggle('selected', state.selectedNodeIds.has(node.id));
+  el.classList.toggle('has-mismatch', !!node._mismatch);
+
+  const latSamples = node._unreached ? null : node._outLatency;
+  const chipWarn = !!node._mismatch;
+  const chipText = node._cyclic ? 'cycle' : (latSamples===null ? 'no input' : fmtSamples(latSamples)+' smp');
+
+  let paramsHtml = '';
+  for (const spec of def.params){
+    paramsHtml += `<div class="prow" title="${escapeAttr(spec.desc||'')}">
+      <div class="plabel">${escapeHtml(spec.label)}${spec.unit?(' <span style="opacity:.55">('+escapeHtml(spec.unit)+')</span>'):''}</div>
+      <div class="pctl">${paramControlHTML(node, spec)}</div>
+    </div>`;
+  }
+
+  el.innerHTML = `
+    <div class="nhead" style="background:${color};" data-role="drag-handle">
+      <div class="hbtn" data-act="collapse" title="Collapse/expand">${node.collapsed?'\u25b6':'\u25bc'}</div>
+      <div class="htitle">${escapeHtml(def.name)}${node.isCompensation?' \u2022 auto':''}</div>
+      <div class="latchip ${chipWarn?'warn':''}" title="Accumulated latency at this node's output">${chipText}</div>
+      <div class="hbtn" data-act="delete" title="Delete node">\u2715</div>
+    </div>
+    <div class="nbody">
+      <div class="nio">${ioRowsHTML(node)}</div>
+      <div class="nextra">
+        <div class="divider"></div>
+        ${paramsHtml}
+        ${latencyRowHTML(node)}
+        ${mismatchBoxHTML(node)}
+      </div>
+    </div>
+  `;
+}
+
+function nodeStructureSignature(node){
+  return [node.filterId, numInputs(node), numOutputs(node), node.collapsed?1:0, node._mismatch?1:0].join('|');
+}
+
+function render(){
+  // remove stale
+  for (const id of Array.from(nodeEls.keys())){
+    if (!state.nodes.has(id)){ nodeEls.get(id).remove(); nodeEls.delete(id); }
+  }
+  for (const node of state.nodes.values()){
+    let el = nodeEls.get(node.id);
+    if (!el){
+      el = buildNodeElement(node);
+      worldEl.appendChild(el);
+      nodeEls.set(node.id, el);
+    } else {
+      renderNodeInner(el, node);
+    }
+    el.style.left = node.x+'px';
+    el.style.top = node.y+'px';
+  }
+  redrawLinks();
+}
+
+// Lightweight refresh used while the user is actively typing in a field:
+// updates latency chips / mismatch boxes / link styling without touching
+// focused inputs or rebuilding node structure.
+function patchDynamic(){
+  const active = document.activeElement;
+  for (const node of state.nodes.values()){
+    const el = nodeEls.get(node.id);
+    if (!el) continue;
+    el.classList.toggle('has-mismatch', !!node._mismatch);
+    const chip = el.querySelector('.latchip');
+    if (chip){
+      const latSamples = node._unreached ? null : node._outLatency;
+      chip.classList.toggle('warn', !!node._mismatch);
+      chip.textContent = node._cyclic ? 'cycle' : (latSamples===null ? 'no input' : fmtSamples(latSamples)+' smp');
+    }
+    // latency row (skip the numeric input itself if it's focused)
+    const latRowSpan = el.querySelector('.latrow .latms');
+    if (latRowSpan){
+      const latSamples = node._unreached ? null : node._outLatency;
+      latRowSpan.textContent = (latSamples===null?'\u2014':fmtMs(latSamples)) + (node.latencyManual?' \u00b7 manual':'') + (getDef(node.filterId).latencyIsEstimate?' \u00b7 est.':'');
+    }
+    const latInput = el.querySelector('.latrow .latin');
+    if (latInput && active!==latInput){ latInput.value = Math.round(node.latencySamples||0); }
+    // mismatch box: rebuild only this subtree (cheap, not the whole node)
+    const nbody = el.querySelector('.nbody');
+    const existingBox = el.querySelector('.mismatch-box');
+    const newBoxHtml = mismatchBoxHTML(node);
+    if (newBoxHtml && !existingBox){
+      nbody.insertAdjacentHTML('beforeend', newBoxHtml);
+    } else if (!newBoxHtml && existingBox){
+      existingBox.remove();
+    } else if (newBoxHtml && existingBox){
+      existingBox.outerHTML = newBoxHtml;
+    }
+  }
+  redrawLinks();
+}
+
+/* ---- Link drawing (screen-space bezier curves) ---- */
+function socketEl(nodeId, side, index){
+  const nEl = nodeEls.get(nodeId);
+  if (!nEl) return null;
+  return nEl.querySelector(`.socket.${side}[data-index="${index}"]`);
+}
+
+function bezierPath(x1,y1,x2,y2){
+  const dx = Math.max(40, Math.abs(x2-x1)*0.5);
+  return `M ${x1} ${y1} C ${x1+dx} ${y1}, ${x2-dx} ${y2}, ${x2} ${y2}`;
+}
+
+function redrawLinks(){
+  const vr = viewportEl.getBoundingClientRect();
+  let svgHtml = '';
+  for (const link of state.links.values()){
+    const fromEl = socketEl(link.from.node, 'out', link.from.socket);
+    const toEl = socketEl(link.to.node, 'in', link.to.socket);
+    if (!fromEl || !toEl) continue;
+    const fr = fromEl.getBoundingClientRect(), tr = toEl.getBoundingClientRect();
+    const x1 = fr.left + fr.width/2 - vr.left, y1 = fr.top + fr.height/2 - vr.top;
+    const x2 = tr.left + tr.width/2 - vr.left, y2 = tr.top + tr.height/2 - vr.top;
+    const toNode = state.nodes.get(link.to.node);
+    const isMismatchLink = toNode && toNode._mismatch && toNode._mismatch.entries.some(e=>e.idx===link.to.socket && e.diff>0);
+    const cls = ['link'];
+    if (isMismatchLink) cls.push('mismatch');
+    if (state.selectedLinkId===link.id) cls.push('selected');
+    const d = bezierPath(x1,y1,x2,y2);
+    svgHtml += `<path class="${cls.join(' ')}" d="${d}" data-link="${link.id}"></path>`;
+    svgHtml += `<path class="link-hit" d="${d}" data-link="${link.id}"></path>`;
+  }
+  if (window.__ghostLink) svgHtml += window.__ghostLink;
+  linksSvg.innerHTML = svgHtml;
+  // reflect connected state on sockets
+  for (const nEl of nodeEls.values()){
+    nEl.querySelectorAll('.socket').forEach(s=>s.classList.remove('connected'));
+  }
+  for (const link of state.links.values()){
+    const fromEl = socketEl(link.from.node,'out',link.from.socket);
+    const toEl = socketEl(link.to.node,'in',link.to.socket);
+    if (fromEl) fromEl.classList.add('connected');
+    if (toEl) toEl.classList.add('connected');
+  }
+}
+
+function fullRecomputeAndRender(){
+  recomputeLatency();
+  render();
+}
+
+/* ---------------------------------------------------------------------
+   5. INTERACTION
+   ------------------------------------------------------------------- */
+function toast(msg, ms){
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toast._h);
+  toast._h = setTimeout(()=>t.classList.remove('show'), ms||1800);
+}
+
+function clearSelection(){
+  state.selectedNodeIds.clear();
+  state.selectedLinkId = null;
+}
+function selectOnly(nodeId){
+  state.selectedNodeIds.clear();
+  state.selectedNodeIds.add(nodeId);
+  state.selectedLinkId = null;
+}
+
+// Lightweight selection-only refresh: just toggles the .selected class on
+// node elements and redraws links (which itself highlights the selected
+// link). Deliberately does NOT touch innerHTML anywhere, unlike render() -
+// selection changes happen on plain mousedown/click, and if we rebuilt node
+// DOM on every such click, clicking into a parameter field to focus it would
+// destroy and recreate that very input out from under the click, so the
+// field would never actually receive focus (this was a real bug: typing
+// into any node field silently did nothing because every click re-rendered
+// the node first).
+function applySelectionClasses(){
+  for (const [id, el] of nodeEls){
+    el.classList.toggle('selected', state.selectedNodeIds.has(id));
+  }
+  redrawLinks();
+}
+
+/* ---- pan / zoom ---- */
+// Overlays (add-node menu, node menu, export panel) now live inside
+// #viewport so they sit correctly below the toolbar - but that means clicks
+// and scrolls inside them would otherwise bubble into the canvas's own
+// mousedown/wheel handlers below (triggering box-select, zoom, etc.
+// underneath the panel). Every canvas-level handler bails out early when
+// the event actually originated inside one of these overlays.
+function isInsideOverlay(target){
+  return !!(target && target.closest && target.closest('#ctxMenu, #nodeCtxMenu, #exportPanel'));
+}
+
+let isPanning = false, panStart = null;
+viewportEl.addEventListener('mousedown', (e)=>{
+  if (isInsideOverlay(e.target)) return;
+  if (e.button===1){ // middle mouse
+    isPanning = true;
+    panStart = { x:e.clientX, y:e.clientY, px:state.pan.x, py:state.pan.y };
+    e.preventDefault();
+  }
+});
+window.addEventListener('mousemove', (e)=>{
+  if (isPanning){
+    state.pan.x = panStart.px + (e.clientX-panStart.x);
+    state.pan.y = panStart.py + (e.clientY-panStart.y);
+    applyWorldTransform();
+    redrawLinks();
+  }
+});
+window.addEventListener('mouseup', (e)=>{ if (e.button===1) isPanning=false; });
+
+viewportEl.addEventListener('wheel', (e)=>{
+  if (isInsideOverlay(e.target)) return; // let the panel/menu scroll its own content
+  e.preventDefault();
+  const r = viewportEl.getBoundingClientRect();
+  const before = screenToWorld(e.clientX, e.clientY);
+  const factor = e.deltaY<0 ? 1.1 : (1/1.1);
+  let newScale = state.scale*factor;
+  newScale = Math.max(0.2, Math.min(2.5, newScale));
+  state.scale = newScale;
+  state.pan.x = (e.clientX - r.left) - before.x*newScale;
+  state.pan.y = (e.clientY - r.top) - before.y*newScale;
+  applyWorldTransform();
+  redrawLinks();
+}, {passive:false});
+
+function fitView(){
+  if (state.nodes.size===0){ state.scale=1; state.pan={x:60,y:60}; applyWorldTransform(); redrawLinks(); return; }
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  for (const node of state.nodes.values()){
+    const el = nodeEls.get(node.id);
+    const h = el ? el.offsetHeight : 120;
+    minX = Math.min(minX, node.x); minY = Math.min(minY, node.y);
+    maxX = Math.max(maxX, node.x+NODE_WIDTH); maxY = Math.max(maxY, node.y+h);
+  }
+  const vr = viewportEl.getBoundingClientRect();
+  const pad = 60;
+  const contentW = (maxX-minX)+pad*2, contentH = (maxY-minY)+pad*2;
+  const scale = Math.max(0.25, Math.min(1.5, Math.min(vr.width/contentW, vr.height/contentH)));
+  state.scale = scale;
+  state.pan.x = -minX*scale + (vr.width - (maxX-minX)*scale)/2;
+  state.pan.y = -minY*scale + (vr.height - (maxY-minY)*scale)/2;
+  applyWorldTransform();
+  redrawLinks();
+}
+
+/* ---- node dragging ---- */
+let dragNodes = null; // Map(nodeId -> {startX,startY})
+let dragMoved = false;
+let dragOrigin = null;
+
+function startNodeDrag(nodeId, e){
+  if (!state.selectedNodeIds.has(nodeId)) selectOnly(nodeId);
+  applySelectionClasses();
+  dragNodes = new Map();
+  for (const id of state.selectedNodeIds){
+    const n = state.nodes.get(id);
+    dragNodes.set(id, {x:n.x, y:n.y});
+  }
+  dragOrigin = {x:e.clientX, y:e.clientY};
+  dragMoved = false;
+}
+
+window.addEventListener('mousemove', (e)=>{
+  if (!dragNodes) return;
+  const dx = (e.clientX-dragOrigin.x)/state.scale;
+  const dy = (e.clientY-dragOrigin.y)/state.scale;
+  if (Math.abs(dx)>1 || Math.abs(dy)>1) dragMoved = true;
+  for (const [id, start] of dragNodes){
+    const n = state.nodes.get(id);
+    if (!n) continue;
+    n.x = Math.round(start.x+dx);
+    n.y = Math.round(start.y+dy);
+    const el = nodeEls.get(id);
+    if (el){ el.style.left = n.x+'px'; el.style.top = n.y+'px'; }
+  }
+  redrawLinks();
+});
+window.addEventListener('mouseup', ()=>{
+  if (dragNodes){ dragNodes = null; }
+});
+
+/* ---- link dragging (creating / re-routing connections) ---- */
+let linkDrag = null; // {fromNode,fromSocket, x,y}
+function socketWorldCenterScreen(nodeId, side, index){
+  const el = socketEl(nodeId, side, index);
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  const vr = viewportEl.getBoundingClientRect();
+  return { x: r.left+r.width/2-vr.left, y: r.top+r.height/2-vr.top };
+}
+
+function startLinkDrag(nodeId, side, index, e){
+  if (side==='in'){
+    const existing = findLinkTo(nodeId, index);
+    if (existing){
+      const from = {...existing.from};
+      deleteLink(existing.id);
+      linkDrag = { fromNode:from.node, fromSocket:from.socket };
+      fullRecomputeAndRender();
+    } else {
+      linkDrag = { toNode:nodeId, toSocket:index };
+    }
+  } else {
+    linkDrag = { fromNode:nodeId, fromSocket:index };
+  }
+  updateGhostLink(e.clientX, e.clientY);
+}
+
+function updateGhostLink(clientX, clientY){
+  if (!linkDrag) { window.__ghostLink=''; return; }
+  const vr = viewportEl.getBoundingClientRect();
+  let start;
+  if (linkDrag.fromNode!==undefined) start = socketWorldCenterScreen(linkDrag.fromNode,'out',linkDrag.fromSocket);
+  else start = socketWorldCenterScreen(linkDrag.toNode,'in',linkDrag.toSocket);
+  if (!start){ window.__ghostLink=''; return; }
+  const ex = clientX-vr.left, ey = clientY-vr.top;
+  const d = linkDrag.fromNode!==undefined ? bezierPath(start.x,start.y,ex,ey) : bezierPath(ex,ey,start.x,start.y);
+  window.__ghostLink = `<path class="ghost" d="${d}"></path>`;
+  redrawLinks();
+}
+
+function finishLinkDrag(clientX, clientY){
+  if (!linkDrag){ return; }
+  const target = document.elementFromPoint(clientX, clientY);
+  const sockEl = target && target.closest ? target.closest('.socket') : null;
+  window.__ghostLink = '';
+  if (sockEl){
+    const toNode2 = sockEl.dataset.node, side2 = sockEl.dataset.side, idx2 = parseInt(sockEl.dataset.index,10);
+    if (linkDrag.fromNode!==undefined && side2==='in'){
+      createLink(linkDrag.fromNode, linkDrag.fromSocket, toNode2, idx2);
+    } else if (linkDrag.toNode!==undefined && side2==='out'){
+      createLink(toNode2, idx2, linkDrag.toNode, linkDrag.toSocket);
+    }
+  }
+  linkDrag = null;
+  fullRecomputeAndRender();
+}
+
+/* ---- box select ---- */
+let boxSel = null;
+function startBoxSelect(e){
+  boxSel = { x0:e.clientX, y0:e.clientY, x1:e.clientX, y1:e.clientY, additive:e.shiftKey };
+  let boxEl = document.createElement('div');
+  boxEl.id = 'selBox';
+  boxEl.style.cssText = 'position:absolute;border:1px solid #e8a355;background:rgba(232,163,85,.12);pointer-events:none;z-index:150;';
+  document.getElementById('viewport').appendChild(boxEl);
+  boxSel.el = boxEl;
+  updateBoxSelect(e);
+}
+function updateBoxSelect(e){
+  if (!boxSel) return;
+  boxSel.x1 = e.clientX; boxSel.y1 = e.clientY;
+  const vr = viewportEl.getBoundingClientRect();
+  const x0 = Math.min(boxSel.x0,boxSel.x1)-vr.left, x1=Math.max(boxSel.x0,boxSel.x1)-vr.left;
+  const y0 = Math.min(boxSel.y0,boxSel.y1)-vr.top, y1=Math.max(boxSel.y0,boxSel.y1)-vr.top;
+  Object.assign(boxSel.el.style, { left:x0+'px', top:y0+'px', width:(x1-x0)+'px', height:(y1-y0)+'px' });
+}
+function endBoxSelect(){
+  if (!boxSel) return;
+  const vr = viewportEl.getBoundingClientRect();
+  const x0 = Math.min(boxSel.x0,boxSel.x1), x1=Math.max(boxSel.x0,boxSel.x1);
+  const y0 = Math.min(boxSel.y0,boxSel.y1), y1=Math.max(boxSel.y0,boxSel.y1);
+  const moved = (x1-x0)>3 || (y1-y0)>3;
+  if (moved){
+    if (!boxSel.additive) state.selectedNodeIds.clear();
+    for (const node of state.nodes.values()){
+      const el = nodeEls.get(node.id);
+      if (!el) continue;
+      const r = el.getBoundingClientRect();
+      if (r.right>=x0 && r.left<=x1 && r.bottom>=y0 && r.top<=y1) state.selectedNodeIds.add(node.id);
+    }
+  } else if (!boxSel.additive){
+    clearSelection();
+  }
+  boxSel.el.remove();
+  boxSel = null;
+  applySelectionClasses();
+}
+
+/* ---- main mouse routing on the viewport ---- */
+viewportEl.addEventListener('mousedown', (e)=>{
+  if (e.button!==0) return;
+  if (isInsideOverlay(e.target)) return; // let the panel/menu handle its own clicks
+  const target = e.target;
+  const socket = target.closest ? target.closest('.socket') : null;
+  const head = target.closest ? target.closest('[data-role="drag-handle"]') : null;
+  const hbtn = target.closest ? target.closest('.hbtn') : null;
+  const nodeEl = target.closest ? target.closest('.node') : null;
+  const linkPath = target.closest ? target.closest('[data-link]') : null;
+
+  closeCtxMenu(); closeNodeCtxMenu();
+
+  if (socket){
+    e.preventDefault();
+    startLinkDrag(socket.dataset.node, socket.dataset.side, parseInt(socket.dataset.index,10), e);
+    return;
+  }
+  if (hbtn) return; // handled by click handler below
+  if (head && nodeEl){
+    e.preventDefault();
+    if (e.shiftKey){
+      if (state.selectedNodeIds.has(nodeEl.dataset.id)) state.selectedNodeIds.delete(nodeEl.dataset.id);
+      else state.selectedNodeIds.add(nodeEl.dataset.id);
+      applySelectionClasses();
+    }
+    startNodeDrag(nodeEl.dataset.id, e);
+    return;
+  }
+  if (linkPath){
+    state.selectedLinkId = linkPath.dataset.link;
+    state.selectedNodeIds.clear();
+    applySelectionClasses();
+    return;
+  }
+  if (nodeEl){
+    // Clicked somewhere in the node body - a parameter field, a label, or
+    // just padding. Update selection state only (see applySelectionClasses
+    // for why this must never touch innerHTML) and otherwise get out of the
+    // way so the browser's normal focus/click behaviour on the field
+    // underneath proceeds untouched.
+    if (!e.shiftKey) selectOnly(nodeEl.dataset.id); else state.selectedNodeIds.add(nodeEl.dataset.id);
+    applySelectionClasses();
+    return;
+  }
+  // empty space
+  startBoxSelect(e);
+});
+
+window.addEventListener('mousemove', (e)=>{
+  if (linkDrag) updateGhostLink(e.clientX, e.clientY);
+  if (boxSel) updateBoxSelect(e);
+});
+window.addEventListener('mouseup', (e)=>{
+  if (e.button!==0) return;
+  if (linkDrag) finishLinkDrag(e.clientX, e.clientY);
+  if (boxSel) endBoxSelect();
+});
+
+/* click handling for header buttons (collapse / delete) + dyn io buttons */
+viewportEl.addEventListener('click', (e)=>{
+  const act = e.target.closest ? e.target.closest('[data-act]') : null;
+  if (!act) return;
+  const nodeEl = act.closest('.node');
+  const nodeId = nodeEl ? nodeEl.dataset.id : null;
+  const node = nodeId ? state.nodes.get(nodeId) : null;
+  switch(act.dataset.act){
+    case 'collapse':
+      node.collapsed = !node.collapsed; render(); break;
+    case 'delete':
+      deleteNode(nodeId); fullRecomputeAndRender(); break;
+    case 'io-inc': {
+      const def = getDef(node.filterId);
+      if (isDynamicInput(node)){
+        const max = def.io.inputs.max; node.numInputs = Math.min(max, numInputs(node)+1);
+      } else if (isDynamicOutput(node)){
+        const max = def.io.outputs.max; node.numOutputs = Math.min(max, numOutputs(node)+1);
+      }
+      fullRecomputeAndRender(); break;
+    }
+    case 'io-dec': {
+      const def = getDef(node.filterId);
+      if (isDynamicInput(node)){
+        const min = def.io.inputs.min; const newN = Math.max(min, numInputs(node)-1);
+        for (const link of Array.from(state.links.values())){
+          if (link.to.node===nodeId && link.to.socket>=newN) deleteLink(link.id);
+        }
+        node.numInputs = newN;
+      } else if (isDynamicOutput(node)){
+        const min = def.io.outputs.min; const newN = Math.max(min, numOutputs(node)-1);
+        for (const link of Array.from(state.links.values())){
+          if (link.from.node===nodeId && link.from.socket>=newN) deleteLink(link.id);
+        }
+        node.numOutputs = newN;
+      }
+      fullRecomputeAndRender(); break;
+    }
+    case 'reset-latency':
+      node.latencyManual = false;
+      node.latencySamples = nodeOwnLatencySamples(node);
+      fullRecomputeAndRender(); break;
+    case 'auto-compensate': {
+      const created = autoCompensate(nodeId);
+      fullRecomputeAndRender();
+      toast(created.length ? `Inserted ${created.length} delay node${created.length>1?'s':''} to align phase.` : 'Nothing to compensate.');
+      break;
+    }
+  }
+});
+
+/* param input handling (delegated) */
+viewportEl.addEventListener('input', (e)=>{
+  const t = e.target;
+  if (t.dataset && t.dataset.pkey){
+    const nodeEl = t.closest('.node');
+    const node = state.nodes.get(nodeEl.dataset.id);
+    const def = getDef(node.filterId);
+    const spec = def.params.find(s=>s.key===t.dataset.pkey);
+    applyParamValue(node, spec, t);
+    recomputeLatency();
+    patchDynamic();
+  } else if (t.dataset && t.dataset.role==='latency-override'){
+    const nodeEl = t.closest('.node');
+    const node = state.nodes.get(nodeEl.dataset.id);
+    const v = parseFloat(t.value);
+    node.latencyManual = true;
+    node.latencySamples = isFinite(v) ? Math.max(0, v) : 0;
+    recomputeLatency();
+    patchDynamic();
+  }
+});
+viewportEl.addEventListener('change', (e)=>{
+  const t = e.target;
+  if ((t.dataset && t.dataset.pkey) || (t.dataset && t.dataset.role==='latency-override')){
+    fullRecomputeAndRender();
+  }
+});
+
+function applyParamValue(node, spec, inputEl){
+  if (!spec) return;
+  let v;
+  if (spec.type==='bool') v = inputEl.checked;
+  else if (spec.type==='int') v = parseInt(inputEl.value,10);
+  else if (spec.type==='float') v = parseFloat(inputEl.value);
+  else v = inputEl.value;
+  if ((spec.type==='int'||spec.type==='float') && !isFinite(v)) v = spec.def;
+  node.params[spec.key] = v;
+}
+
+/* ---- keyboard ---- */
+window.addEventListener('keydown', (e)=>{
+  const tag = document.activeElement ? document.activeElement.tagName : '';
+  const editing = tag==='INPUT' || tag==='SELECT' || tag==='TEXTAREA';
+  if (e.key==='Escape'){
+    closeCtxMenu(); closeNodeCtxMenu();
+    if (linkDrag){ linkDrag=null; window.__ghostLink=''; redrawLinks(); }
+    if (boxSel){ boxSel.el.remove(); boxSel=null; }
+    return;
+  }
+  if (editing) return;
+  if (e.key==='Delete' || e.key==='Backspace'){
+    let changed = false;
+    if (state.selectedNodeIds.size){
+      for (const id of Array.from(state.selectedNodeIds)) deleteNode(id);
+      changed = true;
+    }
+    if (state.selectedLinkId){ deleteLink(state.selectedLinkId); changed = true; }
+    if (changed){ e.preventDefault(); fullRecomputeAndRender(); }
+  }
+});
+
+/* ---------------------------------------------------------------------
+   6. RIGHT-CLICK CONTEXT MENUS
+   ------------------------------------------------------------------- */
+const ctxMenu = document.getElementById('ctxMenu');
+const ctxSearch = ctxMenu.querySelector('input.search');
+const ctxList = ctxMenu.querySelector('.menuList');
+let ctxWorldPos = {x:0,y:0};
+let ctxActiveIndex = -1;
+
+function filterMatches(f, q){
+  if (!q) return true;
+  q = q.toLowerCase();
+  return f.name.toLowerCase().includes(q) ||
+         (f.ffmpeg||'').toLowerCase().includes(q) ||
+         (f.desc||'').toLowerCase().includes(q) ||
+         CAT_MAP[f.cat].name.toLowerCase().includes(q);
+}
+
+function renderCtxList(){
+  const q = ctxSearch.value.trim();
+  let html = '';
+  let flatItems = [];
+  for (const cat of CATEGORIES){
+    const items = FILTERS.filter(f=>f.cat===cat.id && filterMatches(f,q));
+    if (!items.length) continue;
+    html += `<div class="catHeader">${escapeHtml(cat.name)}</div>`;
+    for (const f of items){
+      flatItems.push(f.id);
+      html += `<div class="item" data-filter="${f.id}">
+        <div class="iname"><span class="colordot" style="background:${cat.color}"></span>${escapeHtml(f.name)}${f.ffmpeg?(' <span style="opacity:.45">('+f.ffmpeg+')</span>'):''}</div>
+        <div class="idesc">${escapeHtml(f.desc||'')}</div>
+      </div>`;
+    }
+  }
+  if (!flatItems.length) html = `<div class="empty">No filters match &ldquo;${escapeHtml(q)}&rdquo;</div>`;
+  ctxList.innerHTML = html;
+  ctxActiveIndex = flatItems.length ? 0 : -1;
+  ctxList._flatItems = flatItems;
+  highlightCtxActive();
+}
+function highlightCtxActive(){
+  const items = ctxList.querySelectorAll('.item');
+  items.forEach((it,i)=>it.classList.toggle('active', i===ctxActiveIndex));
+  if (ctxActiveIndex>=0 && items[ctxActiveIndex] && items[ctxActiveIndex].scrollIntoView) items[ctxActiveIndex].scrollIntoView({block:'nearest'});
+}
+
+function openCtxMenu(clientX, clientY){
+  closeNodeCtxMenu();
+  ctxWorldPos = screenToWorld(clientX, clientY);
+  ctxMenu.classList.add('open');
+  const vr = viewportEl.getBoundingClientRect();
+  const localX = clientX - vr.left, localY = clientY - vr.top;
+  const mw = 260, mh = Math.min(0.7*vr.height, 420);
+  const left = Math.min(localX, vr.width-mw-8);
+  const top = Math.min(localY, vr.height-mh-8);
+  ctxMenu.style.left = Math.max(4,left)+'px';
+  ctxMenu.style.top = Math.max(4,top)+'px';
+  ctxSearch.value = '';
+  renderCtxList();
+  setTimeout(()=>ctxSearch.focus(), 0);
+}
+function closeCtxMenu(){ ctxMenu.classList.remove('open'); }
+
+ctxSearch.addEventListener('input', renderCtxList);
+ctxSearch.addEventListener('keydown', (e)=>{
+  const items = ctxList._flatItems || [];
+  if (e.key==='ArrowDown'){ e.preventDefault(); ctxActiveIndex = Math.min(items.length-1, ctxActiveIndex+1); highlightCtxActive(); }
+  else if (e.key==='ArrowUp'){ e.preventDefault(); ctxActiveIndex = Math.max(0, ctxActiveIndex-1); highlightCtxActive(); }
+  else if (e.key==='Enter'){
+    e.preventDefault();
+    if (ctxActiveIndex>=0 && items[ctxActiveIndex]) addNodeFromMenu(items[ctxActiveIndex]);
+  } else if (e.key==='Escape'){ closeCtxMenu(); }
+});
+ctxList.addEventListener('mousedown', (e)=>{
+  const item = e.target.closest('.item');
+  if (!item) return;
+  e.preventDefault();
+  addNodeFromMenu(item.dataset.filter);
+});
+function addNodeFromMenu(filterId){
+  const node = createNode(filterId, ctxWorldPos.x, ctxWorldPos.y);
+  closeCtxMenu();
+  if (node){ selectOnly(node.id); fullRecomputeAndRender(); }
+}
+
+/* ---- node / link right-click menu ---- */
+const nodeCtxMenu = document.getElementById('nodeCtxMenu');
+function openSimpleMenu(clientX, clientY, items){
+  closeCtxMenu();
+  nodeCtxMenu.innerHTML = items.map((it,i)=>
+    `<div class="item ${it.danger?'danger':''}" data-i="${i}">${escapeHtml(it.label)}</div>`).join('');
+  nodeCtxMenu.classList.add('open');
+  const vr = viewportEl.getBoundingClientRect();
+  const localX = clientX - vr.left, localY = clientY - vr.top;
+  nodeCtxMenu.style.left = Math.min(localX, vr.width-190)+'px';
+  nodeCtxMenu.style.top = Math.min(localY, vr.height-items.length*30-16)+'px';
+  nodeCtxMenu._items = items;
+}
+function closeNodeCtxMenu(){ nodeCtxMenu.classList.remove('open'); }
+nodeCtxMenu.addEventListener('mousedown', (e)=>{
+  const item = e.target.closest('.item');
+  if (!item) return;
+  e.preventDefault();
+  const idx = parseInt(item.dataset.i,10);
+  const action = nodeCtxMenu._items[idx];
+  closeNodeCtxMenu();
+  if (action && action.run) action.run();
+});
+
+viewportEl.addEventListener('contextmenu', (e)=>{
+  if (isInsideOverlay(e.target)) return; // don't stack our menu on top of an open panel
+  e.preventDefault();
+  const nodeEl = e.target.closest ? e.target.closest('.node') : null;
+  const linkPath = e.target.closest ? e.target.closest('[data-link]') : null;
+  if (nodeEl){
+    const nodeId = nodeEl.dataset.id;
+    const node = state.nodes.get(nodeId);
+    openSimpleMenu(e.clientX, e.clientY, [
+      { label: node.collapsed?'Expand':'Collapse', run:()=>{ node.collapsed=!node.collapsed; render(); } },
+      { label:'Duplicate', run:()=>{ duplicateNode(nodeId); } },
+      { label:'Reset parameters', run:()=>{ node.params = defaultParams(getDef(node.filterId)); fullRecomputeAndRender(); } },
+      { label:'Delete', danger:true, run:()=>{ deleteNode(nodeId); fullRecomputeAndRender(); } },
+    ]);
+  } else if (linkPath){
+    const linkId = linkPath.dataset.link;
+    openSimpleMenu(e.clientX, e.clientY, [
+      { label:'Remove connection', danger:true, run:()=>{ deleteLink(linkId); fullRecomputeAndRender(); } },
+    ]);
+  } else {
+    openCtxMenu(e.clientX, e.clientY);
+  }
+});
+window.addEventListener('mousedown', (e)=>{
+  if (!ctxMenu.contains(e.target)) closeCtxMenu();
+  if (!nodeCtxMenu.contains(e.target)) closeNodeCtxMenu();
+});
+
+function duplicateNode(nodeId){
+  const src = state.nodes.get(nodeId);
+  const copy = createNode(src.filterId, src.x+30, src.y+30);
+  copy.params = JSON.parse(JSON.stringify(src.params));
+  copy.numInputs = src.numInputs; copy.numOutputs = src.numOutputs;
+  copy.latencyManual = src.latencyManual; copy.latencySamples = src.latencySamples;
+  selectOnly(copy.id);
+  fullRecomputeAndRender();
+}
+
+/* ---------------------------------------------------------------------
+   7. EXPORT: build a real ffmpeg -filter_complex string from the graph
+   ------------------------------------------------------------------- */
+function sanitizeLabel(s){
+  return String(s).replace(/[^a-zA-Z0-9_]/g,'_') || 'out';
+}
+function needsQuoting(v){
+  return /[:'\[\],;\\=]/.test(String(v));
+}
+function quoteVal(v){
+  if (!needsQuoting(v)) return String(v);
+  return "'" + String(v).replace(/'/g, "'\\''") + "'";
+}
+function serializeParams(def, params, exclude){
+  const parts = [];
+  for (const spec of def.params){
+    if (exclude && exclude.has(spec.key)) continue;
+    let v = params[spec.key];
+    if (v===spec.def) continue;
+    if (spec.type==='bool') v = v ? 1 : 0;
+    if (v===''||v===undefined||v===null) continue;
+    parts.push(`${spec.key}=${quoteVal(v)}`);
+  }
+  return parts.join(':');
+}
+
+function buildFilterComplex(){
+  const issues = [];
+  const { order, cyclic } = topoSort();
+  if (cyclic.size>0){
+    issues.push('The graph contains a cycle (a loop of connections) \u2014 ffmpeg filtergraphs must be acyclic. Remove the connection that closes the loop.');
+    return { ok:false, issues };
+  }
+  if (state.nodes.size===0){
+    issues.push('The graph is empty \u2014 add at least an Audio Source, some filters, and an Audio Output.');
+    return { ok:false, issues };
+  }
+
+  // 1. validate required connections
+  for (const node of state.nodes.values()){
+    const def = getDef(node.filterId);
+    const nIn = numInputs(node);
+    for (let i=0;i<nIn;i++){
+      if (!findLinkTo(node.id, i)){
+        issues.push(`"${def.name}" (${node.id}) input "${inputLabel(node,i)}" is not connected.`);
+      }
+    }
+  }
+  const sourceNodes = Array.from(state.nodes.values()).filter(n=>n.filterId==='audio_source');
+  const outputNodes = Array.from(state.nodes.values()).filter(n=>n.filterId==='audio_output');
+  if (sourceNodes.length===0) issues.push('Add at least one Audio Source node.');
+  if (outputNodes.length===0) issues.push('Add at least one Audio Output node.');
+  const usedOutLabels = new Map();
+  for (const n of outputNodes){
+    const lbl = sanitizeLabel(n.params.label||'out');
+    if (usedOutLabels.has(lbl)) issues.push(`Two Audio Output nodes both use the label "${lbl}" \u2014 make them unique.`);
+    usedOutLabels.set(lbl, n.id);
+  }
+  if (issues.length) return { ok:false, issues };
+
+  // 2. resolve output labels per (nodeId,socketIdx), inserting implicit asplit for fan-out
+  const outLabel = new Map(); // "nodeId:sock" -> label string (no brackets)
+  const extraLines = [];      // implicit asplit lines, emitted before the node that needs it consumed... actually
+                               // simplest: emit them right where the producing node's own line would go (immediately after it).
+  const outgoingBySocket = new Map(); // "nodeId:sock" -> [links]
+  for (const link of state.links.values()){
+    const key = link.from.node+':'+link.from.socket;
+    if (!outgoingBySocket.has(key)) outgoingBySocket.set(key, []);
+    outgoingBySocket.get(key).push(link);
+  }
+
+  function baseLabelFor(node, sockIdx){
+    // If this output feeds exactly one Audio Output node, borrow its friendly label.
+    const key = node.id+':'+sockIdx;
+    const links = outgoingBySocket.get(key) || [];
+    if (links.length===1){
+      const dest = state.nodes.get(links[0].to.node);
+      if (dest && dest.filterId==='audio_output') return sanitizeLabel(dest.params.label||'out');
+    }
+    return 'n'+node.id.replace(/\D/g,'')+'_'+sockIdx;
+  }
+
+  // resolves the label that should be used where `link` is consumed as an input
+  function resolveInputLabel(link){
+    const fanLbl = outLabel.get('fan:'+link.id);
+    if (fanLbl) return fanLbl;
+    return outLabel.get(link.from.node+':'+link.from.socket);
+  }
+
+  const chainLines = [];
+  for (const nodeId of order){
+    const node = state.nodes.get(nodeId);
+    const def = getDef(node.filterId);
+    if (node.filterId==='audio_source'){
+      outLabel.set(nodeId+':0', `${node.params.inputIndex}:a`);
+      continue;
+    }
+    if (node.filterId==='audio_output') continue; // no filter emitted, handled via -map
+
+    const nIn = numInputs(node), nOut = numOutputs(node);
+    const inLabels = [];
+    for (let i=0;i<nIn;i++){
+      const link = findLinkTo(nodeId, i);
+      inLabels.push(resolveInputLabel(link));
+    }
+
+    const outLabels = [];
+    for (let o=0;o<nOut;o++) outLabels.push(baseLabelFor(node,o));
+
+    let argStr;
+    if (node.filterId==='amix'){
+      const rest = serializeParams(def, node.params);
+      argStr = `inputs=${nIn}` + (rest?':'+rest:'');
+    } else if (node.filterId==='amerge'){
+      argStr = `inputs=${nIn}`;
+    } else if (node.filterId==='join'){
+      const rest = serializeParams(def, node.params);
+      argStr = `inputs=${nIn}` + (rest?':'+rest:'');
+    } else if (node.filterId==='acrossfade'){
+      const rest = serializeParams(def, node.params);
+      argStr = (nIn!==2 ? `inputs=${nIn}` : '') + (nIn!==2 && rest ? ':' : '') + rest;
+    } else if (node.filterId==='asplit'){
+      argStr = `${nOut}`;
+    } else {
+      argStr = serializeParams(def, node.params);
+    }
+    const tok = def.ffmpeg + (argStr ? '='+argStr : '');
+    chainLines.push(`[${inLabels.join('][')}]${tok}[${outLabels.join('][')}]`);
+    outLabels.forEach((lbl,o)=> outLabel.set(nodeId+':'+o, lbl));
+
+    // Fan out any output socket of THIS node that feeds more than one
+    // downstream input (ffmpeg pad outputs can only be consumed once, so a
+    // real asplit has to be synthesized for the extra consumers).
+    for (let o=0;o<nOut;o++){
+      const links = outgoingBySocket.get(nodeId+':'+o) || [];
+      if (links.length>1){
+        const base = outLabel.get(nodeId+':'+o);
+        const fanLabels = links.map((_,i)=> base+'_f'+i);
+        chainLines.push(`[${base}]asplit=${links.length}[${fanLabels.join('][')}]`);
+        links.forEach((link,i)=> outLabel.set('fan:'+link.id, fanLabels[i]));
+      }
+    }
+  }
+
+  const mapArgs = [];
+  for (const n of outputNodes){
+    const link = findLinkTo(n.id, 0);
+    if (!link) continue;
+    mapArgs.push(`-map "[${resolveInputLabel(link)}]"`);
+  }
+
+  const filterComplex = chainLines.join(';\n  ');
+  const inputIdxs = Array.from(new Set(sourceNodes.map(n=>n.params.inputIndex))).sort((a,b)=>a-b);
+  const inputArgs = inputIdxs.map(i=>`-i input${i}.wav`).join(' ');
+  const command = `ffmpeg ${inputArgs} -filter_complex "\n  ${filterComplex}\n" ${mapArgs.join(' ')} output.wav`;
+
+  return { ok:true, issues:[], filterComplex, command, mapArgs };
+}
+
+/* ---- export panel wiring ---- */
+const exportPanel = document.getElementById('exportPanel');
+const exportBody = document.getElementById('exportBody');
+document.getElementById('btnExport').addEventListener('click', ()=>{
+  renderExportPanel();
+  exportPanel.classList.add('open');
+});
+document.getElementById('btnCloseExport').addEventListener('click', ()=> exportPanel.classList.remove('open'));
+
+function renderExportPanel(){
+  const result = buildFilterComplex();
+  let html = '';
+  if (!result.ok){
+    html += `<div class="issues"><strong>Can\u2019t export yet:</strong><ul>${result.issues.map(i=>`<li>${escapeHtml(i)}</li>`).join('')}</ul></div>`;
+  } else {
+    html += `<div class="okmsg">\u2713 Graph is valid.</div>`;
+    html += `<h4>filter_complex</h4><textarea readonly>${escapeHtml(result.filterComplex)}</textarea>`;
+    html += `<button class="tb-btn" data-copy="fc" style="margin-top:6px;">Copy filter_complex</button>`;
+    html += `<h4>Full command</h4><div class="cmdbox">${escapeHtml(result.command)}</div>`;
+    html += `<button class="tb-btn" data-copy="cmd" style="margin-top:6px;">Copy full command</button>`;
+    html += `<h4>Latency to each output</h4>`;
+    for (const n of state.nodes.values()){
+      if (n.filterId!=='audio_output') continue;
+      const link = findLinkTo(n.id, 0);
+      const upstream = link ? state.nodes.get(link.from.node) : null;
+      const lat = upstream ? upstream._outLatency : null;
+      html += `<div style="margin:4px 0;">"${escapeHtml(n.params.label)}": ${lat===null||lat===undefined?'\u2014':fmtSamples(lat)+' samples ('+fmtMs(lat)+')'}</div>`;
+    }
+  }
+  exportBody.innerHTML = html;
+  exportBody.querySelectorAll('[data-copy]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const text = btn.dataset.copy==='fc' ? result.filterComplex : result.command;
+      copyToClipboard(text);
+      toast('Copied to clipboard');
+    });
+  });
+}
+function copyToClipboard(text){
+  try{
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text);
+    else {
+      const ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); ta.remove();
+    }
+  }catch(e){ /* clipboard not available - silently ignore */ }
+}
+
+/* ---------------------------------------------------------------------
+   8. DEMO: the dry/wet phase-error scenario from the brief
+   ------------------------------------------------------------------- */
+function loadDryWetDemo(){
+  clearGraph();
+  const src = createNode('audio_source', 40, 160);
+  const split = createNode('asplit', 300, 160);
+  const wet = createNode('afftfilt', 560, 40);   // has real algorithmic (window) latency
+  wet.params.win_size = 1024;                     // match the brief's example exactly
+  const mix = createNode('amix', 900, 160);
+  const out = createNode('audio_output', 1160, 160);
+
+  createLink(src.id, 0, split.id, 0);
+  createLink(split.id, 0, mix.id, 0);   // dry path straight into the mixer
+  createLink(split.id, 1, wet.id, 0);   // wet path through the FFT filter
+  createLink(wet.id, 0, mix.id, 1);
+  createLink(mix.id, 0, out.id, 0);
+
+  fullRecomputeAndRender();
+  fitView();
+  toast('Loaded: split \u2192 dry + FFT-filtered wet \u2192 mix. Note the phase warning on Mix.');
+}
+document.getElementById('btnDemo').addEventListener('click', loadDryWetDemo);
+document.getElementById('btnClear').addEventListener('click', ()=>{
+  clearGraph(); fullRecomputeAndRender();
+});
+document.getElementById('btnFit').addEventListener('click', fitView);
+
+/* ---------------------------------------------------------------------
+   9. SAVE / LOAD
+   Graphs are saved as a plain JSON file the person downloads, and loaded
+   back the same way - this keeps the tool fully self-contained (no server,
+   no account) while letting people keep, version and share their graphs.
+   ------------------------------------------------------------------- */
+const SAVE_FORMAT_VERSION = 1;
+
+function serializeGraph(){
+  return {
+    type: 'ffmpeg-audio-node-graph',
+    version: SAVE_FORMAT_VERSION,
+    savedAt: new Date().toISOString(),
+    sampleRate: state.sampleRate,
+    view: { pan: state.pan, scale: state.scale },
+    nodes: Array.from(state.nodes.values()).map(n => ({
+      id: n.id,
+      filterId: n.filterId,
+      x: n.x, y: n.y,
+      collapsed: !!n.collapsed,
+      params: n.params,
+      numInputs: n.numInputs,
+      numOutputs: n.numOutputs,
+      latencyManual: !!n.latencyManual,
+      latencySamples: n.latencySamples,
+      isCompensation: !!n.isCompensation,
+    })),
+    links: Array.from(state.links.values()).map(l => ({
+      id: l.id, from: l.from, to: l.to,
+    })),
+  };
+}
+
+function downloadJSON(obj, filename){
+  const blob = new Blob([JSON.stringify(obj, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    setTimeout(()=>URL.revokeObjectURL(url), 2000);
+  }
+}
+
+function saveGraph(){
+  if (state.nodes.size===0){ toast('Nothing to save \u2014 the graph is empty.'); return; }
+  try {
+    const data = serializeGraph();
+    const stamp = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+    downloadJSON(data, `audio-filtergraph-${stamp}.json`);
+    toast('Graph saved.');
+  } catch (err){
+    toast('Could not save the graph in this browser.', 3000);
+  }
+}
+
+// Rebuilds state.nodes / state.links directly (rather than going through
+// createNode/createLink) so that saved node and link ids are preserved
+// exactly - anything else would require remapping every link reference.
+function loadGraphFromObject(data){
+  if (!data || typeof data!=='object' || !Array.isArray(data.nodes) || !Array.isArray(data.links)){
+    throw new Error('that file doesn\u2019t look like a saved filtergraph (missing nodes/links)');
+  }
+  clearGraph();
+
+  const validRates = [44100,48000,96000,192000];
+  state.sampleRate = (typeof data.sampleRate==='number' && data.sampleRate>0) ? data.sampleRate : 48000;
+
+  let skippedNodes = 0, skippedLinks = 0;
+  for (const nd of (data.nodes||[])){
+    const def = nd && FILTER_MAP[nd.filterId];
+    if (!nd || typeof nd.id!=='string' || !def){ skippedNodes++; continue; }
+    const node = {
+      id: nd.id,
+      filterId: nd.filterId,
+      x: Number.isFinite(nd.x) ? nd.x : 0,
+      y: Number.isFinite(nd.y) ? nd.y : 0,
+      collapsed: !!nd.collapsed,
+      params: Object.assign(defaultParams(def), (nd.params && typeof nd.params==='object') ? nd.params : {}),
+      numInputs: isDynamicInput({filterId:nd.filterId}) ? (Number.isFinite(nd.numInputs) ? nd.numInputs : def.io.inputs.def) : undefined,
+      numOutputs: isDynamicOutput({filterId:nd.filterId}) ? (Number.isFinite(nd.numOutputs) ? nd.numOutputs : def.io.outputs.def) : undefined,
+      latencyManual: !!nd.latencyManual,
+      latencySamples: Number.isFinite(nd.latencySamples) ? nd.latencySamples : 0,
+      isCompensation: !!nd.isCompensation,
+      _inLatencies: [], _outLatency: null, _mismatch: null, _unreached: true, _cyclic: false,
+    };
+    state.nodes.set(node.id, node);
+  }
+  for (const ld of (data.links||[])){
+    if (!ld || !ld.from || !ld.to || !state.nodes.has(ld.from.node) || !state.nodes.has(ld.to.node)){
+      skippedLinks++; continue;
+    }
+    const fromSock = Number.isFinite(ld.from.socket) ? ld.from.socket : 0;
+    const toSock = Number.isFinite(ld.to.socket) ? ld.to.socket : 0;
+    const id = (typeof ld.id==='string' && !state.links.has(ld.id)) ? ld.id : newLinkId();
+    state.links.set(id, { id, from:{node:ld.from.node, socket:fromSock}, to:{node:ld.to.node, socket:toSock} });
+  }
+
+  // Re-derive the id counters from what actually got loaded, so any *new*
+  // node/link created from now on can never collide with a loaded id.
+  let maxNode = 0, maxLink = 0;
+  for (const id of state.nodes.keys()){ const m=/^n(\d+)$/.exec(id); if (m) maxNode = Math.max(maxNode, parseInt(m[1],10)); }
+  for (const id of state.links.keys()){ const m=/^l(\d+)$/.exec(id); if (m) maxLink = Math.max(maxLink, parseInt(m[1],10)); }
+  state.nextNodeId = maxNode+1;
+  state.nextLinkId = maxLink+1;
+
+  if (!validRates.includes(state.sampleRate)) state.sampleRate = 48000;
+  sampleRateSel.value = String(state.sampleRate);
+
+  fullRecomputeAndRender();
+  fitView();
+  return { nodeCount: state.nodes.size, linkCount: state.links.size, skippedNodes, skippedLinks };
+}
+
+function loadGraphFromFile(file){
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      const r = loadGraphFromObject(data);
+      let msg = `Loaded ${r.nodeCount} node(s), ${r.linkCount} connection(s).`;
+      if (r.skippedNodes || r.skippedLinks) msg += ` Skipped ${r.skippedNodes} unrecognized node(s) and ${r.skippedLinks} bad link(s).`;
+      toast(msg, 3200);
+    } catch (err){
+      toast('Could not load that file \u2014 ' + (err && err.message ? err.message : 'invalid JSON'), 3500);
+    }
+  };
+  reader.onerror = () => toast('Could not read that file.');
+  reader.readAsText(file);
+}
+
+document.getElementById('btnSave').addEventListener('click', saveGraph);
+const loadFileInput = document.getElementById('loadFileInput');
+document.getElementById('btnLoad').addEventListener('click', ()=> loadFileInput.click());
+loadFileInput.addEventListener('change', (e)=>{
+  const file = e.target.files && e.target.files[0];
+  if (file) loadGraphFromFile(file);
+  loadFileInput.value = ''; // allow picking the same file again later
+});
+
+/* ---------------------------------------------------------------------
+   10. INIT
+   ------------------------------------------------------------------- */
+const sampleRateSel = document.getElementById('sampleRateSel');
+sampleRateSel.addEventListener('change', ()=>{
+  state.sampleRate = parseInt(sampleRateSel.value,10);
+  fullRecomputeAndRender();
+});
+
+function init(){
+  state.sampleRate = parseInt(sampleRateSel.value,10);
+  applyWorldTransform();
+  loadDryWetDemo();
+}
+
+if (document.readyState==='loading') document.addEventListener('DOMContentLoaded', init);
+else init();
+
+// Expose a small, intentionally-stable surface for debugging / automated
+// testing. Harmless to leave available in normal use.
+window.__appState = state;
+window.__appAPI = {
+  createNode, deleteNode, createLink, deleteLink, clearGraph,
+  recomputeLatency, autoCompensate, buildFilterComplex, loadDryWetDemo,
+  getDef, FILTERS, CATEGORIES, fitView,
+  serializeGraph, loadGraphFromObject, saveGraph,
+};
+</script>
+</body>
+</html>
