@@ -705,6 +705,16 @@ function commonBiquadTail(){
     {key:'precision', label:'Precision', type:'select', def:'auto', options:['auto','s16','s32','f32','f64']},
   ];
 }
+F({id:'acrossover', name:'Crossover', ffmpeg:'acrossover', cat:'eq',
+  desc:'Splits input into channels based on input.',
+  io:{ inputs:['in'], outputs:{dynamic:true,label:'out',min:2,max:8,def:2} },
+  latency:()=>0, params:[
+    {key:'split', label:'Frequencies', type:'string', def:100},
+    {key:'order', label:'Order', type:'select', def:'2nd', options:['2nd','4th','6th','8th','10th','12th','14th','16th','18th','20th']},
+    {key:'level', label:'Input Level', type:'float', def:1, min:0, max:1, step:0.001},
+    {key:'gains', label:'Band gains', type:'float', def:1, min:0, max:1, step:0.001},
+    {key:'precision', label:'Precision', type:'select', def:'auto', options:['auto','float','double']},
+  ]});
 F({id:'equalizer', name:'Parametric EQ', ffmpeg:'equalizer', cat:'eq',
   desc:'Single-band peaking equalizer.',
   io:{ inputs:['in'], outputs:['out'] }, latency:()=>0,
