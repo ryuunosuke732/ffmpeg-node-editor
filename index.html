@@ -1911,6 +1911,7 @@ function redrawLinks(){
 function fullRecomputeAndRender(){
   recomputeLatency();
   render();
+  scheduleAutosave();
 }
 
 /* ---------------------------------------------------------------------
@@ -2048,7 +2049,10 @@ window.addEventListener('mousemove', (e)=>{
   redrawLinks();
 });
 window.addEventListener('mouseup', ()=>{
-  if (dragNodes){ dragNodes = null; }
+  if (dragNodes){
+    if (dragMoved) scheduleAutosave(); // persist the new node position(s)
+    dragNodes = null;
+  }
 });
 
 /* ---- link dragging (creating / re-routing connections) ---- */
@@ -2217,7 +2221,7 @@ viewportEl.addEventListener('click', (e)=>{
   const node = nodeId ? state.nodes.get(nodeId) : null;
   switch(act.dataset.act){
     case 'collapse':
-      node.collapsed = !node.collapsed; render(); break;
+      node.collapsed = !node.collapsed; render(); scheduleAutosave(); break;
     case 'delete':
       deleteNode(nodeId); fullRecomputeAndRender(); break;
     case 'io-inc': {
@@ -2848,6 +2852,58 @@ loadFileInput.addEventListener('change', (e)=>{
 });
 
 /* ---------------------------------------------------------------------
+   9b. AUTOSAVE TO LOCALSTORAGE
+   The last graph the person built is continuously persisted to this
+   browser's localStorage (separate from the explicit Save/Load-to-file
+   feature above) and restored automatically the next time the page loads,
+   so accidentally closing the tab or reloading never loses work. It is
+   entirely best-effort: localStorage can be unavailable (private
+   browsing, a restrictive file:// origin, storage disabled/full), so
+   every read and write is wrapped in try/catch and simply no-ops on
+   failure rather than surfacing an error - autosave degrading silently is
+   far better than it crashing the editor.
+   ------------------------------------------------------------------- */
+const AUTOSAVE_KEY = 'ffmpeg-audio-node-editor:autosave:v1';
+const AUTOSAVE_DEBOUNCE_MS = 400;
+let autosaveTimer = null;
+let suppressAutosave = false; // set while we are the ones writing state FROM a saved snapshot
+
+function scheduleAutosave(){
+  if (suppressAutosave) return;
+  clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(writeAutosaveNow, AUTOSAVE_DEBOUNCE_MS);
+}
+function writeAutosaveNow(){
+  try {
+    localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(serializeGraph()));
+  } catch (e){ /* best-effort - storage unavailable, full, or blocked */ }
+}
+// Bypasses the debounce and writes immediately - used by automated tests,
+// which shouldn't have to wait on real timers to verify a write happened.
+function flushAutosaveNow(){
+  clearTimeout(autosaveTimer);
+  if (!suppressAutosave) writeAutosaveNow();
+}
+
+// Returns true if a previous session was found and restored.
+function tryRestoreAutosave(){
+  let raw;
+  try { raw = localStorage.getItem(AUTOSAVE_KEY); }
+  catch (e){ return false; } // storage unavailable (private mode, file:// restrictions, etc.)
+  if (!raw) return false;
+  try {
+    const data = JSON.parse(raw);
+    suppressAutosave = true;
+    loadGraphFromObject(data);
+    suppressAutosave = false;
+    return true;
+  } catch (e){
+    suppressAutosave = false;
+    return false; // corrupt autosave entry - fall back to the demo instead of failing to load
+  }
+}
+
+/* ---------------------------------------------------------------------
    10. INIT
    ------------------------------------------------------------------- */
 const sampleRateSel = document.getElementById('sampleRateSel');
@@ -2859,7 +2915,12 @@ sampleRateSel.addEventListener('change', ()=>{
 function init(){
   state.sampleRate = parseInt(sampleRateSel.value,10);
   applyWorldTransform();
-  loadDryWetDemo();
+  const restored = tryRestoreAutosave();
+  if (restored){
+    toast('Restored your last session from this browser.', 2400);
+  } else {
+    loadDryWetDemo();
+  }
 }
 
 if (document.readyState==='loading') document.addEventListener('DOMContentLoaded', init);
@@ -2873,6 +2934,7 @@ window.__appAPI = {
   recomputeLatency, autoCompensate, buildFilterComplex, loadDryWetDemo,
   getDef, FILTERS, CATEGORIES, fitView,
   serializeGraph, loadGraphFromObject, saveGraph,
+  scheduleAutosave, flushAutosaveNow, tryRestoreAutosave, AUTOSAVE_KEY,
 };
 </script>
 </body>
